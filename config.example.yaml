@@ -1,27 +1,16 @@
-# このファイルを `config.yaml` にリネームして値を編集すると、そのまま利用できます。
-# 例: cp config.example.yaml config.yaml
-
 rss_urls:
   - https://example.com/rss.xml
   - https://another.example.org/feed
 
 retry:
-  # 失敗時の最大リトライ回数
   max_retries: 3
-  # 初回リトライ待機秒（省略可）
   initial_delay_sec: 2
-  # バックオフ係数（省略可）
   backoff_multiplier: 2
 
 storage:
-  # S3 保存時のプレフィックス
   s3_prefix: rss
 
-# Prefect Blocks / Secrets の参照名（実際に作成した Block 名に置き換えてください）
 prefect_blocks:
-  # S3 接続情報を保持する Block 名
   s3_credentials_block: s3-credentials-prod
-  # Ollama のベース URL を保存した Secret Block 名
   ollama_base_url_block: ollama-base-url
-  # Ollama のモデル名を保存した Secret Block 名
   ollama_model_block: ollama-model
