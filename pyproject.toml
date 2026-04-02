@@ -5,7 +5,14 @@ description = "daily life workflows"
 requires-python = ">=3.10"
 dependencies = [
   "prefect",
+  "prefect-aws",
+  "pyyaml",
+  "pytest",
 ]
 
 [tool.uv]
 package = false
+
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
