@@ -1,9 +1,10 @@
-from prefect import flow
+from prefect import flow, get_run_logger
 
 
 @flow
 def hello_flow() -> None:
-    print("hello")
+    logger = get_run_logger()
+    logger.info("hello")
 
 
 if __name__ == "__main__":
