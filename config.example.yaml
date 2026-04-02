@@ -1,0 +1,15 @@
+rss_urls:
+  - https://example.com/rss.xml
+  - https://another.example.org/feed
+
+retry:
+  max_retries: 3
+  initial_delay_sec: 2
+  backoff_multiplier: 2
+
+storage:
+  s3_prefix: rss
+
+prefect_blocks:
+  aws_credentials_block: aws-credentials-prod
+  ollama_connection_secret_block: ollama-connection
