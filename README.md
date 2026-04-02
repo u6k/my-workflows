@@ -22,3 +22,15 @@ source .venv/bin/activate
 # 依存インストール
 uv sync
 ```
+
+## Prefect ダッシュボード起動手順
+
+```bash
+# プロジェクト直下で仮想環境を有効化
+source .venv/bin/activate
+
+# Prefect API サーバー + UI を起動
+prefect server start
+```
+
+起動後、ブラウザで `http://127.0.0.1:4200` を開くと Prefect ダッシュボードを確認できます。
