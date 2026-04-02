@@ -1,0 +1,11 @@
+[project]
+name = "my-workflows"
+version = "0.1.0"
+description = "daily life workflows"
+requires-python = ">=3.10"
+dependencies = [
+  "prefect",
+]
+
+[tool.uv]
+package = false
