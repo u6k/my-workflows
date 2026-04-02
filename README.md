@@ -52,20 +52,18 @@ cp config.example.yaml config.yaml
 - `retry.initial_delay_sec`: 初回リトライ待機秒（任意）
 - `retry.backoff_multiplier`: バックオフ係数（任意）
 - `storage.s3_prefix`: S3 保存プレフィックス
-- `prefect_blocks.s3_credentials_block`: S3 接続情報 Block 名
-- `prefect_blocks.ollama_base_url_block`: Ollama Base URL を格納した Secret Block 名
-- `prefect_blocks.ollama_model_block`: Ollama モデル名を格納した Secret Block 名
+- `prefect_blocks.aws_credentials_block`: AWS Credentials Block 名
+- `prefect_blocks.ollama_connection_secret_block`: Ollama 接続情報(JSON)を格納した Secret Block 名
 
 ### 2. Prefect Block / Secret を作成
 
 `flows/rss_ingest_flow.py` は、起動時に `config.yaml` の `prefect_blocks` で指定した名前の Block/Secret を読み込みます。事前に Prefect UI で以下を作成してください。
 
 1. Prefect サーバーを起動し、`http://127.0.0.1:4200` を開く
-2. **Blocks** 画面で S3 接続用 Block を作成し、名前を `prefect_blocks.s3_credentials_block` の値と一致させる
-3. **Blocks** 画面で Secret Block を2つ作成する
-   - Ollama Base URL 用（例: `http://localhost:11434`）
-   - Ollama モデル名用（例: `llama3.1:8b`）
-4. Secret Block の名前をそれぞれ `prefect_blocks.ollama_base_url_block` / `prefect_blocks.ollama_model_block` と一致させる
+2. **Blocks** 画面で AWS Credentials Block を作成し、名前を `prefect_blocks.aws_credentials_block` の値と一致させる
+3. **Blocks** 画面で Secret Block を1つ作成し、値は JSON 形式で保存する（例）
+   - `{"base_url":"http://localhost:11434","model":"llama3.1:8b"}`
+4. Secret Block の名前を `prefect_blocks.ollama_connection_secret_block` と一致させる
 
 > 注意: フローは Block 名・キー名のみログに出力し、Secret の値そのものはログ出力しません。
 

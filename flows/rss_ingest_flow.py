@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import yaml
 from prefect import flow, get_run_logger, task
-from prefect.blocks.core import Block
 from prefect.blocks.system import Secret
+from prefect_aws.credentials import AwsCredentials
 
 
 REQUIRED_PREFECT_BLOCK_KEYS = (
-    "s3_credentials_block",
-    "ollama_base_url_block",
-    "ollama_model_block",
+    "aws_credentials_block",
+    "ollama_connection_secret_block",
+)
+REQUIRED_OLLAMA_CONNECTION_KEYS = (
+    "base_url",
+    "model",
 )
 
 
@@ -95,17 +99,27 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
 
     block_config = config["prefect_blocks"]
 
-    s3_block_name = block_config["s3_credentials_block"]
-    Block.load(s3_block_name)
-    logger.info("Prefect block loaded: key=s3_credentials_block name=%s", s3_block_name)
+    aws_credentials_block = block_config["aws_credentials_block"]
+    AwsCredentials.load(aws_credentials_block)
+    logger.info("Prefect block loaded: key=aws_credentials_block name=%s", aws_credentials_block)
 
-    ollama_base_url_block = block_config["ollama_base_url_block"]
-    Secret.load(ollama_base_url_block).get()
-    logger.info("Prefect secret loaded: key=ollama_base_url_block name=%s", ollama_base_url_block)
+    ollama_secret_block = block_config["ollama_connection_secret_block"]
+    ollama_secret_value = Secret.load(ollama_secret_block).get()
+    logger.info("Prefect secret loaded: key=ollama_connection_secret_block name=%s", ollama_secret_block)
 
-    ollama_model_block = block_config["ollama_model_block"]
-    Secret.load(ollama_model_block).get()
-    logger.info("Prefect secret loaded: key=ollama_model_block name=%s", ollama_model_block)
+    try:
+        ollama_connection = json.loads(ollama_secret_value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Ollama Secret block value must be valid JSON") from exc
+
+    if not isinstance(ollama_connection, dict):
+        raise ValueError("Ollama Secret block value must be a JSON object")
+
+    missing_ollama_keys = [
+        key for key in REQUIRED_OLLAMA_CONNECTION_KEYS if not isinstance(ollama_connection.get(key), str) or not ollama_connection[key]
+    ]
+    if missing_ollama_keys:
+        raise ValueError(f"Ollama Secret JSON is missing required keys: {', '.join(missing_ollama_keys)}")
 
 
 @flow(name="rss_ingest_flow")
