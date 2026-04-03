@@ -251,13 +251,16 @@ def test_summarize_briefing_task_returns_ollama_response(mock_urlopen: MagicMock
     mock_response = MagicMock()
     mock_response.read.return_value = OLLAMA_GENERATE_RESPONSE
     mock_urlopen.return_value.__enter__.return_value = mock_response
+    mock_logger = MagicMock()
 
-    summary = rss_ingest_flow.summarize_briefing_task.fn(
-        article_content="本文",
-        ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
-    )
+    with patch("flows.rss_ingest_flow._get_task_logger", return_value=mock_logger):
+        summary = rss_ingest_flow.summarize_briefing_task.fn(
+            article_content="本文",
+            ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+        )
 
     assert summary == "summary text"
+    assert mock_logger.debug.call_count == 2
 
 
 @patch("flows.rss_ingest_flow.urlopen")
@@ -265,13 +268,16 @@ def test_summarize_one_sentence_task_returns_ollama_response(mock_urlopen: Magic
     mock_response = MagicMock()
     mock_response.read.return_value = OLLAMA_GENERATE_RESPONSE
     mock_urlopen.return_value.__enter__.return_value = mock_response
+    mock_logger = MagicMock()
 
-    summary = rss_ingest_flow.summarize_one_sentence_task.fn(
-        article_content="本文",
-        ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
-    )
+    with patch("flows.rss_ingest_flow._get_task_logger", return_value=mock_logger):
+        summary = rss_ingest_flow.summarize_one_sentence_task.fn(
+            article_content="本文",
+            ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+        )
 
     assert summary == "summary text"
+    assert mock_logger.debug.call_count == 2
 
 
 @patch("flows.rss_ingest_flow.trafilatura.extract")

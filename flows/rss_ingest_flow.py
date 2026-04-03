@@ -431,9 +431,13 @@ def check_s3_object_exists_task(article_url: str, storage: dict[str, Any], aws_c
 
 @task(name="summarize_briefing_task")
 def summarize_briefing_task(article_content: str, ollama_connection: dict[str, str]) -> str:
+    logger = _get_task_logger()
+    prompt = _build_briefing_prompt(article_content)
+    logger.debug("ollama briefing prompt: %s", prompt)
+
     payload = {
         "model": ollama_connection["model"],
-        "prompt": _build_briefing_prompt(article_content),
+        "prompt": prompt,
         "stream": False,
     }
     request = Request(
@@ -446,6 +450,7 @@ def summarize_briefing_task(article_content: str, ollama_connection: dict[str, s
         body = response.read().decode("utf-8")
     response_json = json.loads(body)
     summary = response_json.get("response", "").strip()
+    logger.debug("ollama briefing response: %s", summary)
     if not summary:
         raise ValueError("Ollama response does not contain summary text")
     return summary
@@ -453,9 +458,13 @@ def summarize_briefing_task(article_content: str, ollama_connection: dict[str, s
 
 @task(name="summarize_one_sentence_task")
 def summarize_one_sentence_task(article_content: str, ollama_connection: dict[str, str]) -> str:
+    logger = _get_task_logger()
+    prompt = _build_one_sentence_prompt(article_content)
+    logger.debug("ollama one-sentence prompt: %s", prompt)
+
     payload = {
         "model": ollama_connection["model"],
-        "prompt": _build_one_sentence_prompt(article_content),
+        "prompt": prompt,
         "stream": False,
     }
     request = Request(
@@ -468,6 +477,7 @@ def summarize_one_sentence_task(article_content: str, ollama_connection: dict[st
         body = response.read().decode("utf-8")
     response_json = json.loads(body)
     summary = response_json.get("response", "").strip()
+    logger.debug("ollama one-sentence response: %s", summary)
     if not summary:
         raise ValueError("Ollama response does not contain one sentence summary text")
     return summary
