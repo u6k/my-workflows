@@ -3,9 +3,7 @@ from __future__ import annotations
 import logging
 from html.parser import HTMLParser
 from pathlib import Path
-from socket import timeout as SocketTimeout
 from typing import Any
-from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
@@ -344,7 +342,7 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     for link in unique_links:
         try:
             article = fetch_article_task(link)
-        except (HTTPError, URLError, SocketTimeout, TimeoutError, ValueError) as exc:
+        except Exception as exc:
             logger.warning("article fetch skipped: url=%s reason=%s", link, exc)
             continue
 
