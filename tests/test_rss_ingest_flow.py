@@ -115,6 +115,7 @@ RSS_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
     <item><title>A</title><link>https://example.com/a</link></item>
     <item><title>B</title><link>https://example.com/b</link></item>
     <item><title>B duplicate</title><link>https://example.com/b</link></item>
+    <item><title>C redirect</title><link>https://www.google.com/url?url=https%3A%2F%2Fexample.com%2Fc&sa=D</link></item>
   </channel>
 </rss>
 """
@@ -132,7 +133,7 @@ ATOM_XML = b"""<?xml version="1.0" encoding="utf-8"?>
 def test_extract_links_from_feed_xml_supports_rss_and_deduplicates() -> None:
     links = rss_ingest_flow._extract_links_from_feed_xml(RSS_XML)
 
-    assert links == ["https://example.com/a", "https://example.com/b"]
+    assert links == ["https://example.com/a", "https://example.com/b", "https://example.com/c"]
 
 
 def test_extract_links_from_feed_xml_supports_atom() -> None:
@@ -155,12 +156,12 @@ def test_fetch_feed_task_returns_links_from_feed(
 
     links = rss_ingest_flow.fetch_feed_task.fn("https://example.com/rss.xml")
 
-    assert links == ["https://example.com/a", "https://example.com/b"]
+    assert links == ["https://example.com/a", "https://example.com/b", "https://example.com/c"]
     mock_urlopen.assert_called_once_with("https://example.com/rss.xml", timeout=30)
     mock_logger.debug.assert_called_once_with(
         "extracted links: feed_url=%s links=%s",
         "https://example.com/rss.xml",
-        ["https://example.com/a", "https://example.com/b"],
+        ["https://example.com/a", "https://example.com/b", "https://example.com/c"],
     )
 
 
@@ -193,3 +194,11 @@ def test_get_task_logger_returns_standard_logger_when_prefect_context_missing(mo
     logger = rss_ingest_flow._get_task_logger()
 
     assert logger.name == "flows.rss_ingest_flow"
+
+
+def test_normalize_extracted_link_extracts_google_redirect_url() -> None:
+    link = "https://www.google.com/url?url=https%3A%2F%2Fexample.com%2Fdest&sa=D"
+
+    normalized = rss_ingest_flow._normalize_extracted_link(link)
+
+    assert normalized == "https://example.com/dest"

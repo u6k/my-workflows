@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 import xml.etree.ElementTree as ET
 
@@ -101,6 +102,15 @@ def _local_name(tag: str) -> str:
     return tag
 
 
+def _normalize_extracted_link(link: str) -> str:
+    if not link.startswith("https://www.google.com/url"):
+        return link
+
+    parsed = urlparse(link)
+    query = parse_qs(parsed.query)
+    return query.get("url", [link])[0]
+
+
 def _extract_links_from_feed_xml(feed_xml: bytes) -> list[str]:
     try:
         root = ET.fromstring(feed_xml)
@@ -129,12 +139,13 @@ def _extract_links_from_feed_xml(feed_xml: bytes) -> list[str]:
     unique_links: list[str] = []
     seen: set[str] = set()
     for link in links:
-        if not link or not link.startswith(("http://", "https://")):
+        normalized_link = _normalize_extracted_link(link)
+        if not normalized_link or not normalized_link.startswith(("http://", "https://")):
             continue
-        if link in seen:
+        if normalized_link in seen:
             continue
-        seen.add(link)
-        unique_links.append(link)
+        seen.add(normalized_link)
+        unique_links.append(normalized_link)
 
     return unique_links
 
