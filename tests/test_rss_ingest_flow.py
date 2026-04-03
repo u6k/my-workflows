@@ -164,11 +164,32 @@ def test_fetch_feed_task_returns_links_from_feed(
     )
 
 
+@patch("flows.rss_ingest_flow.get_run_logger")
 @patch("flows.rss_ingest_flow.urlopen")
-def test_fetch_feed_task_raises_when_no_entries(mock_urlopen: MagicMock) -> None:
+def test_fetch_feed_task_raises_when_no_entries(
+    mock_urlopen: MagicMock,
+    mock_get_run_logger: MagicMock,
+) -> None:
     mock_response = MagicMock()
     mock_response.read.return_value = b"<rss><channel><title>empty</title></channel></rss>"
     mock_urlopen.return_value.__enter__.return_value = mock_response
+    mock_logger = MagicMock()
+    mock_get_run_logger.return_value = mock_logger
 
     with pytest.raises(ValueError):
         rss_ingest_flow.fetch_feed_task.fn("https://example.com/empty.xml")
+
+    mock_logger.debug.assert_called_once_with(
+        "extracted links: feed_url=%s links=%s",
+        "https://example.com/empty.xml",
+        [],
+    )
+
+
+@patch("flows.rss_ingest_flow.get_run_logger")
+def test_get_task_logger_returns_standard_logger_when_prefect_context_missing(mock_get_run_logger: MagicMock) -> None:
+    mock_get_run_logger.side_effect = rss_ingest_flow.MissingContextError("missing")
+
+    logger = rss_ingest_flow._get_task_logger()
+
+    assert logger.name == "flows.rss_ingest_flow"

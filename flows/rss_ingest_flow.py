@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 from urllib.request import urlopen
@@ -9,6 +10,7 @@ import xml.etree.ElementTree as ET
 import yaml
 from prefect import flow, get_run_logger, task
 from prefect.blocks.system import Secret
+from prefect.exceptions import MissingContextError
 from prefect_aws.credentials import AwsCredentials
 
 
@@ -86,6 +88,14 @@ def _validate_config(config: dict[str, Any]) -> None:
 
 
 
+
+
+def _get_task_logger() -> logging.Logger:
+    try:
+        return get_run_logger()
+    except MissingContextError:
+        return logging.getLogger(__name__)
+
 def _local_name(tag: str) -> str:
     if "}" in tag:
         return tag.rsplit("}", 1)[1]
@@ -132,7 +142,7 @@ def _extract_links_from_feed_xml(feed_xml: bytes) -> list[str]:
 
 @task(name="fetch_feed_task")
 def fetch_feed_task(feed_url: str) -> list[str]:
-    logger = get_run_logger()
+    logger = _get_task_logger()
 
     with urlopen(feed_url, timeout=30) as response:
         feed_xml = response.read()
@@ -186,7 +196,7 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
 
 @flow(name="rss_ingest_flow")
 def rss_ingest_flow(config_path: str = "config.yaml") -> None:
-    logger = get_run_logger()
+    logger = _get_task_logger()
 
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
@@ -195,6 +205,9 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     for feed_url in list(dict.fromkeys(config["rss_urls"])):
         links = fetch_feed_task(feed_url)
         all_links.extend(links)
+
+    for link in all_links:
+        logger.debug("all_links record: %s", link)
 
     logger.info("feed links extracted: total=%d", len(all_links))
 
