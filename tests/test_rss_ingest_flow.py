@@ -106,3 +106,58 @@ def test_validate_prerequisites_task_raises_when_secret_json_is_invalid(
         rss_ingest_flow.validate_prerequisites_task.fn(parsed_config)
 
     mock_aws_credentials.load.assert_called_once_with("aws-credentials-prod")
+
+
+RSS_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example RSS</title>
+    <item><title>A</title><link>https://example.com/a</link></item>
+    <item><title>B</title><link>https://example.com/b</link></item>
+    <item><title>B duplicate</title><link>https://example.com/b</link></item>
+  </channel>
+</rss>
+"""
+
+
+ATOM_XML = b"""<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Atom</title>
+  <entry><title>A</title><link rel="alternate" href="https://example.com/atom-a" /></entry>
+  <entry><title>B</title><link href="https://example.com/atom-b" /></entry>
+</feed>
+"""
+
+
+def test_extract_links_from_feed_xml_supports_rss_and_deduplicates() -> None:
+    links = rss_ingest_flow._extract_links_from_feed_xml(RSS_XML)
+
+    assert links == ["https://example.com/a", "https://example.com/b"]
+
+
+def test_extract_links_from_feed_xml_supports_atom() -> None:
+    links = rss_ingest_flow._extract_links_from_feed_xml(ATOM_XML)
+
+    assert links == ["https://example.com/atom-a", "https://example.com/atom-b"]
+
+
+@patch("flows.rss_ingest_flow.urlopen")
+def test_fetch_feed_task_returns_links_from_feed(mock_urlopen: MagicMock) -> None:
+    mock_response = MagicMock()
+    mock_response.read.return_value = RSS_XML
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    links = rss_ingest_flow.fetch_feed_task.fn("https://example.com/rss.xml")
+
+    assert links == ["https://example.com/a", "https://example.com/b"]
+    mock_urlopen.assert_called_once_with("https://example.com/rss.xml", timeout=30)
+
+
+@patch("flows.rss_ingest_flow.urlopen")
+def test_fetch_feed_task_raises_when_no_entries(mock_urlopen: MagicMock) -> None:
+    mock_response = MagicMock()
+    mock_response.read.return_value = b"<rss><channel><title>empty</title></channel></rss>"
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    with pytest.raises(ValueError):
+        rss_ingest_flow.fetch_feed_task.fn("https://example.com/empty.xml")

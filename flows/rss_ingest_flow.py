@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.request import urlopen
+import xml.etree.ElementTree as ET
 
 import yaml
 from prefect import flow, get_run_logger, task
@@ -82,6 +84,63 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise ValueError(f"config.prefect_blocks values must be non-empty strings: {', '.join(invalid_block_names)}")
 
 
+
+
+def _local_name(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", 1)[1]
+    return tag
+
+
+def _extract_links_from_feed_xml(feed_xml: bytes) -> list[str]:
+    try:
+        root = ET.fromstring(feed_xml)
+    except ET.ParseError as exc:
+        raise ValueError("failed to parse RSS/Atom XML") from exc
+
+    links: list[str] = []
+
+    for element in root.iter():
+        name = _local_name(element.tag)
+
+        if name == "item":
+            for child in element:
+                if _local_name(child.tag) == "link" and child.text:
+                    links.append(child.text.strip())
+        elif name == "entry":
+            for child in element:
+                if _local_name(child.tag) != "link":
+                    continue
+
+                href = child.attrib.get("href")
+                rel = child.attrib.get("rel", "alternate")
+                if href and rel in ("alternate", ""):
+                    links.append(href.strip())
+
+    unique_links: list[str] = []
+    seen: set[str] = set()
+    for link in links:
+        if not link or not link.startswith(("http://", "https://")):
+            continue
+        if link in seen:
+            continue
+        seen.add(link)
+        unique_links.append(link)
+
+    return unique_links
+
+
+@task(name="fetch_feed_task")
+def fetch_feed_task(feed_url: str) -> list[str]:
+    with urlopen(feed_url, timeout=30) as response:
+        feed_xml = response.read()
+
+    links = _extract_links_from_feed_xml(feed_xml)
+    if len(links) == 0:
+        raise ValueError(f"feed has no entries: {feed_url}")
+
+    return links
+
 @task(name="load_config_task")
 def load_config_task(config_path: str = "config.yaml") -> dict[str, Any]:
     config = _load_yaml_config(config_path)
@@ -124,8 +183,17 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
 
 @flow(name="rss_ingest_flow")
 def rss_ingest_flow(config_path: str = "config.yaml") -> None:
+    logger = get_run_logger()
+
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
+
+    all_links: list[str] = []
+    for feed_url in list(dict.fromkeys(config["rss_urls"])):
+        links = fetch_feed_task(feed_url)
+        all_links.extend(links)
+
+    logger.info("feed links extracted: total=%d", len(all_links))
 
 
 if __name__ == "__main__":
