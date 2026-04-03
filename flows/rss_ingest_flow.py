@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-import json
+import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
+from urllib.request import urlopen
+import xml.etree.ElementTree as ET
 
 import yaml
 from prefect import flow, get_run_logger, task
 from prefect.blocks.system import Secret
+from prefect.exceptions import MissingContextError
 from prefect_aws.credentials import AwsCredentials
 
 
@@ -82,6 +86,84 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise ValueError(f"config.prefect_blocks values must be non-empty strings: {', '.join(invalid_block_names)}")
 
 
+
+
+
+
+def _get_task_logger() -> logging.Logger:
+    try:
+        return get_run_logger()
+    except MissingContextError:
+        return logging.getLogger(__name__)
+
+def _local_name(tag: str) -> str:
+    if "}" in tag:
+        return tag.rsplit("}", 1)[1]
+    return tag
+
+
+def _normalize_extracted_link(link: str) -> str:
+    if not link.startswith("https://www.google.com/url"):
+        return link
+
+    parsed = urlparse(link)
+    query = parse_qs(parsed.query)
+    return query.get("url", [link])[0]
+
+
+def _extract_links_from_feed_xml(feed_xml: bytes) -> list[str]:
+    try:
+        root = ET.fromstring(feed_xml)
+    except ET.ParseError as exc:
+        raise ValueError("failed to parse RSS/Atom XML") from exc
+
+    links: list[str] = []
+
+    for element in root.iter():
+        name = _local_name(element.tag)
+
+        if name == "item":
+            for child in element:
+                if _local_name(child.tag) == "link" and child.text:
+                    links.append(child.text.strip())
+        elif name == "entry":
+            for child in element:
+                if _local_name(child.tag) != "link":
+                    continue
+
+                href = child.attrib.get("href")
+                rel = child.attrib.get("rel", "alternate")
+                if href and rel in ("alternate", ""):
+                    links.append(href.strip())
+
+    unique_links: list[str] = []
+    seen: set[str] = set()
+    for link in links:
+        normalized_link = _normalize_extracted_link(link)
+        if not normalized_link or not normalized_link.startswith(("http://", "https://")):
+            continue
+        if normalized_link in seen:
+            continue
+        seen.add(normalized_link)
+        unique_links.append(normalized_link)
+
+    return unique_links
+
+
+@task(name="fetch_feed_task")
+def fetch_feed_task(feed_url: str) -> list[str]:
+    logger = _get_task_logger()
+
+    with urlopen(feed_url, timeout=30) as response:
+        feed_xml = response.read()
+
+    links = _extract_links_from_feed_xml(feed_xml)
+    logger.debug("extracted links: feed_url=%s links=%s", feed_url, links)
+    if len(links) == 0:
+        raise ValueError(f"feed has no entries: {feed_url}")
+
+    return links
+
 @task(name="load_config_task")
 def load_config_task(config_path: str = "config.yaml") -> dict[str, Any]:
     config = _load_yaml_config(config_path)
@@ -107,13 +189,10 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
     ollama_secret_value = Secret.load(ollama_secret_block).get()
     logger.info("Prefect secret loaded: key=ollama_connection_secret_block name=%s", ollama_secret_block)
 
-    try:
-        ollama_connection = json.loads(ollama_secret_value)
-    except json.JSONDecodeError as exc:
-        raise ValueError("Ollama Secret block value must be valid JSON") from exc
+    if not isinstance(ollama_secret_value, dict):
+        raise ValueError("Ollama Secret block value must be a dict")
 
-    if not isinstance(ollama_connection, dict):
-        raise ValueError("Ollama Secret block value must be a JSON object")
+    ollama_connection = ollama_secret_value
 
     missing_ollama_keys = [
         key for key in REQUIRED_OLLAMA_CONNECTION_KEYS if not isinstance(ollama_connection.get(key), str) or not ollama_connection[key]
@@ -124,8 +203,20 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
 
 @flow(name="rss_ingest_flow")
 def rss_ingest_flow(config_path: str = "config.yaml") -> None:
+    logger = _get_task_logger()
+
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
+
+    all_links: list[str] = []
+    for feed_url in list(dict.fromkeys(config["rss_urls"])):
+        links = fetch_feed_task(feed_url)
+        all_links.extend(links)
+
+    for link in all_links:
+        logger.debug("all_links record: %s", link)
+
+    logger.info("feed links extracted: total=%d", len(all_links))
 
 
 if __name__ == "__main__":
