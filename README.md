@@ -53,6 +53,7 @@ cp config.example.yaml config.yaml
 - `retry.backoff_multiplier`: バックオフ係数（任意）
 - `storage.s3_bucket`: S3互換ストレージのバケット名
 - `storage.s3_prefix`: S3 保存プレフィックス
+- `target_date`: `daily-news-blog-digest-flow` で `target_date` パラメータ未指定時に使う日付（`YYYY-MM-DD`、省略時は実行日のUTC日付）
 - 既存オブジェクト判定: `s3://{s3_bucket}/{s3_prefix}/{urlのmd5先頭2文字}/{urlのmd5}.json` が存在する記事は再取得せずスキップ
 - 保存JSON: Trafilatura による本文抽出結果 `content` と、生HTML `raw_html` の両方を保持
 - Ollama 要約: `briefing_summary` と `one_sentence_summary` を本文から生成して保存
@@ -77,4 +78,13 @@ cp config.example.yaml config.yaml
 ```bash
 source .venv/bin/activate
 python flows/rss_ingest_flow.py
+```
+
+## Daily News Blog Digest Flow の設定と実行
+
+`flows/daily_news_blog_digest_flow.py` は、`target_date` 引数が未指定の場合に `config.yaml` の `target_date` を参照します。`config.yaml` に `target_date` が無い場合は、実行日の UTC 日付が使われます。
+
+```bash
+source .venv/bin/activate
+python flows/daily_news_blog_digest_flow.py
 ```
