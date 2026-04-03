@@ -54,6 +54,7 @@ cp config.example.yaml config.yaml
 - `storage.s3_bucket`: S3互換ストレージのバケット名
 - `storage.s3_prefix`: S3 保存プレフィックス
 - 既存オブジェクト判定: `s3://{s3_bucket}/{s3_prefix}/{urlのmd5先頭2文字}/{urlのmd5}.json` が存在する記事は再取得せずスキップ
+- 保存JSON: 抽出済み本文 `content` に加えて生HTML `raw_html` も保持
 - `prefect_blocks.aws_credentials_block`: AWS Credentials Block 名
 - `prefect_blocks.ollama_connection_secret_block`: Ollama 接続情報(JSON)を格納した Secret Block 名
 

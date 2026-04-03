@@ -76,12 +76,13 @@ storage:
 - JSON Lines / 連結レコード形式は採用しない（ファイル肥大化回避）。
 
 ### 3.2 JSON 必須キー
-以下7キーを必須とする:
+以下8キーを必須とする:
 - `url`
 - `title`
 - `published_timestamp`
 - `fetch_timestamp`
 - `content`
+- `raw_html`
 - `briefing_summary`
 - `one_sentence_summary`
 
@@ -94,6 +95,7 @@ storage:
   "published_timestamp": "2026-04-01T12:34:56Z",
   "fetch_timestamp": "2026-04-02T00:00:00Z",
   "content": "記事本文（抽出済みテキスト）",
+  "raw_html": "<!doctype html>...",
   "briefing_summary": "複数段落の要約（ブリーフィング向け）",
   "one_sentence_summary": "1文要約",
   "metadata": {

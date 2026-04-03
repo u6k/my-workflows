@@ -243,6 +243,7 @@ def test_fetch_article_task_returns_content_and_metadata(mock_urlopen: MagicMock
     assert article["url"] == "https://example.com/posts/1"
     assert article["title"] == "Example title"
     assert "Paragraph A." in article["content"]
+    assert "<html>" in article["raw_html"]
     assert article["metadata"]["author"] == "Jane Doe"
     assert article["metadata"]["tags"] == ["ai", "python", "tech"]
 

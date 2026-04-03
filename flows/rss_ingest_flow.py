@@ -355,6 +355,7 @@ def fetch_article_task(article_url: str) -> dict[str, Any]:
     extracted = _extract_article_content_and_metadata(article_html)
     extracted["url"] = article_url
     extracted["id"] = _url_to_md5(article_url)
+    extracted["raw_html"] = article_html
     return extracted
 
 
