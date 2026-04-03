@@ -8,6 +8,7 @@ retry:
   backoff_multiplier: 2
 
 storage:
+  s3_bucket: news-bucket
   s3_prefix: rss
 
 prefect_blocks:

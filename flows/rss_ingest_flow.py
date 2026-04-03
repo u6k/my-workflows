@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -70,6 +72,10 @@ def _validate_config(config: dict[str, Any]) -> None:
     if not isinstance(s3_prefix, str) or not s3_prefix:
         raise ValueError("config.storage.s3_prefix must be a non-empty string")
 
+    s3_bucket = storage.get("s3_bucket")
+    if not isinstance(s3_bucket, str) or not s3_bucket:
+        raise ValueError("config.storage.s3_bucket must be a non-empty string")
+
     prefect_blocks = config.get("prefect_blocks")
     if not isinstance(prefect_blocks, dict):
         raise ValueError("config.prefect_blocks must be an object")
@@ -107,6 +113,15 @@ def _normalize_extracted_link(link: str) -> str:
     parsed = urlparse(link)
     query = parse_qs(parsed.query)
     return query.get("url", [link])[0]
+
+
+def _url_to_md5(url: str) -> str:
+    return hashlib.md5(url.encode("utf-8")).hexdigest()
+
+
+def _build_s3_object_key(s3_prefix: str, article_id: str) -> str:
+    normalized_prefix = s3_prefix.strip("/")
+    return f"{normalized_prefix}/{article_id[:2]}/{article_id}.json"
 
 
 def _extract_links_from_feed_xml(feed_xml: bytes) -> list[str]:
@@ -279,7 +294,43 @@ def fetch_article_task(article_url: str) -> dict[str, Any]:
     article_html = raw_html.decode(content_type, errors="replace")
     extracted = _extract_article_content_and_metadata(article_html)
     extracted["url"] = article_url
+    extracted["id"] = _url_to_md5(article_url)
     return extracted
+
+
+@task(name="store_to_s3_task")
+def store_to_s3_task(article: dict[str, Any], storage: dict[str, Any], aws_credentials_block_name: str) -> str:
+    article_id = article["id"]
+    object_key = _build_s3_object_key(storage["s3_prefix"], article_id)
+
+    aws_credentials = AwsCredentials.load(aws_credentials_block_name)
+    s3_client = aws_credentials.get_boto3_session().client("s3")
+    s3_client.put_object(
+        Bucket=storage["s3_bucket"],
+        Key=object_key,
+        Body=json.dumps(article, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+    return object_key
+
+
+@task(name="check_s3_object_exists_task")
+def check_s3_object_exists_task(article_url: str, storage: dict[str, Any], aws_credentials_block_name: str) -> dict[str, Any]:
+    article_id = _url_to_md5(article_url)
+    object_key = _build_s3_object_key(storage["s3_prefix"], article_id)
+
+    aws_credentials = AwsCredentials.load(aws_credentials_block_name)
+    s3_client = aws_credentials.get_boto3_session().client("s3")
+    try:
+        s3_client.head_object(Bucket=storage["s3_bucket"], Key=object_key)
+        return {"exists": True, "id": article_id, "object_key": object_key}
+    except Exception as exc:
+        response = getattr(exc, "response", {})
+        error = response.get("Error", {})
+        error_code = str(error.get("Code", ""))
+        if error_code in {"404", "NoSuchKey", "NotFound"}:
+            return {"exists": False, "id": article_id, "object_key": object_key}
+        raise
 
 
 @task(name="load_config_task")
@@ -339,23 +390,53 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     logger.info("feed links extracted: total=%d unique=%d", len(all_links), len(unique_links))
 
     article_count = 0
+    stored_count = 0
+    skipped_existing_count = 0
     for link in unique_links:
+        s3_lookup = check_s3_object_exists_task(
+            article_url=link,
+            storage=config["storage"],
+            aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
+        )
+        if s3_lookup["exists"]:
+            logger.info(
+                "article already exists in s3, skip fetch/summarize: id=%s url=%s s3://%s/%s",
+                s3_lookup["id"],
+                link,
+                config["storage"]["s3_bucket"],
+                s3_lookup["object_key"],
+            )
+            skipped_existing_count += 1
+            continue
+
         try:
             article = fetch_article_task(link)
         except Exception as exc:
             logger.warning("article fetch skipped: url=%s reason=%s", link, exc)
             continue
 
+        object_key = store_to_s3_task(
+            article=article,
+            storage=config["storage"],
+            aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
+        )
+
         logger.debug(
-            "article fetched: url=%s title=%s metadata=%s content_length=%d",
+            "article fetched and stored: id=%s url=%s s3://%s/%s title=%s metadata=%s content_length=%d",
+            article["id"],
             article["url"],
+            config["storage"]["s3_bucket"],
+            object_key,
             article["title"],
             article["metadata"],
             len(article["content"]),
         )
         article_count += 1
+        stored_count += 1
 
     logger.info("article fetching completed: total=%d", article_count)
+    logger.info("article storing completed: total=%d", stored_count)
+    logger.info("article skipped by existing s3 object: total=%d", skipped_existing_count)
 
 
 if __name__ == "__main__":

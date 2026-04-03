@@ -15,6 +15,7 @@ retry:
   initial_delay_sec: 2
   backoff_multiplier: 2
 storage:
+  s3_bucket: news-bucket
   s3_prefix: rss
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
@@ -27,6 +28,7 @@ rss_urls: []
 retry:
   max_retries: 3
 storage:
+  s3_bucket: news-bucket
   s3_prefix: rss
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
@@ -68,7 +70,7 @@ def test_validate_prerequisites_task_loads_blocks_and_json_secret(
     parsed_config = {
         "rss_urls": ["https://example.com/rss.xml", "https://example.com/rss.xml"],
         "retry": {"max_retries": 3},
-        "storage": {"s3_prefix": "rss"},
+        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
             "ollama_connection_secret_block": "ollama-connection",
@@ -95,7 +97,7 @@ def test_validate_prerequisites_task_raises_when_secret_value_is_not_dict(
     parsed_config = {
         "rss_urls": ["https://example.com/rss.xml"],
         "retry": {"max_retries": 3},
-        "storage": {"s3_prefix": "rss"},
+        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
             "ollama_connection_secret_block": "ollama-connection",
@@ -237,11 +239,78 @@ def test_fetch_article_task_returns_content_and_metadata(mock_urlopen: MagicMock
 
     article = rss_ingest_flow.fetch_article_task.fn("https://example.com/posts/1")
 
+    assert article["id"] == "53b6f6a3bf5405c5e570d16e8f723e63"
     assert article["url"] == "https://example.com/posts/1"
     assert article["title"] == "Example title"
     assert "Paragraph A." in article["content"]
     assert article["metadata"]["author"] == "Jane Doe"
     assert article["metadata"]["tags"] == ["ai", "python", "tech"]
+
+
+@patch("flows.rss_ingest_flow.AwsCredentials")
+def test_store_to_s3_task_stores_article_json_with_hashed_key(mock_aws_credentials: MagicMock) -> None:
+    mock_s3_client = MagicMock()
+    mock_session = MagicMock()
+    mock_session.client.return_value = mock_s3_client
+    mock_aws_credentials.load.return_value.get_boto3_session.return_value = mock_session
+
+    key = rss_ingest_flow.store_to_s3_task.fn(
+        article={"id": "ab1234567890abcdef", "url": "https://example.com/a", "title": "A"},
+        storage={"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        aws_credentials_block_name="aws-credentials-prod",
+    )
+
+    assert key == "rss/ab/ab1234567890abcdef.json"
+    mock_aws_credentials.load.assert_called_once_with("aws-credentials-prod")
+    mock_session.client.assert_called_once_with("s3")
+    mock_s3_client.put_object.assert_called_once()
+    put_object_kwargs = mock_s3_client.put_object.call_args.kwargs
+    assert put_object_kwargs["Bucket"] == "news-bucket"
+    assert put_object_kwargs["Key"] == "rss/ab/ab1234567890abcdef.json"
+
+
+@patch("flows.rss_ingest_flow.AwsCredentials")
+def test_check_s3_object_exists_task_returns_true_when_object_exists(mock_aws_credentials: MagicMock) -> None:
+    mock_s3_client = MagicMock()
+    mock_session = MagicMock()
+    mock_session.client.return_value = mock_s3_client
+    mock_aws_credentials.load.return_value.get_boto3_session.return_value = mock_session
+
+    result = rss_ingest_flow.check_s3_object_exists_task.fn(
+        article_url="https://example.com/posts/1",
+        storage={"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        aws_credentials_block_name="aws-credentials-prod",
+    )
+
+    assert result["exists"] is True
+    assert result["id"] == "53b6f6a3bf5405c5e570d16e8f723e63"
+    assert result["object_key"] == "rss/53/53b6f6a3bf5405c5e570d16e8f723e63.json"
+    mock_s3_client.head_object.assert_called_once_with(
+        Bucket="news-bucket",
+        Key="rss/53/53b6f6a3bf5405c5e570d16e8f723e63.json",
+    )
+
+
+@patch("flows.rss_ingest_flow.AwsCredentials")
+def test_check_s3_object_exists_task_returns_false_when_object_not_found(mock_aws_credentials: MagicMock) -> None:
+    mock_s3_client = MagicMock()
+    mock_session = MagicMock()
+    mock_session.client.return_value = mock_s3_client
+    mock_aws_credentials.load.return_value.get_boto3_session.return_value = mock_session
+
+    not_found_error = Exception("not found")
+    not_found_error.response = {"Error": {"Code": "404"}}
+    mock_s3_client.head_object.side_effect = not_found_error
+
+    result = rss_ingest_flow.check_s3_object_exists_task.fn(
+        article_url="https://example.com/posts/1",
+        storage={"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        aws_credentials_block_name="aws-credentials-prod",
+    )
+
+    assert result["exists"] is False
+    assert result["id"] == "53b6f6a3bf5405c5e570d16e8f723e63"
+    assert result["object_key"] == "rss/53/53b6f6a3bf5405c5e570d16e8f723e63.json"
 
 
 @patch("flows.rss_ingest_flow.urlopen")
@@ -254,6 +323,8 @@ def test_fetch_article_task_raises_when_status_is_not_200(mock_urlopen: MagicMoc
         rss_ingest_flow.fetch_article_task.fn("https://example.com/posts/error")
 
 
+@patch("flows.rss_ingest_flow.check_s3_object_exists_task")
+@patch("flows.rss_ingest_flow.store_to_s3_task")
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
@@ -263,18 +334,28 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
+    mock_store_to_s3_task: MagicMock,
+    mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
         "rss_urls": ["https://example.com/rss.xml"],
         "retry": {"max_retries": 3},
-        "storage": {"s3_prefix": "rss"},
+        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
             "ollama_connection_secret_block": "ollama-connection",
         },
     }
     mock_fetch_feed_task.return_value = ["https://example.com/a", "https://example.com/b"]
-    mock_fetch_article_task.side_effect = [ValueError("unexpected status code: 500"), {"url": "https://example.com/b", "title": "B", "metadata": {}, "content": "ok"}]
+    mock_check_s3_object_exists_task.side_effect = [
+        {"exists": False, "id": "aaaa", "object_key": "rss/aa/aaaa.json"},
+        {"exists": False, "id": "bbbb", "object_key": "rss/bb/bbbb.json"},
+    ]
+    mock_fetch_article_task.side_effect = [
+        ValueError("unexpected status code: 500"),
+        {"id": "bbbb", "url": "https://example.com/b", "title": "B", "metadata": {}, "content": "ok"},
+    ]
+    mock_store_to_s3_task.return_value = "rss/bb/bbbb.json"
 
     with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
         mock_logger = MagicMock()
@@ -291,6 +372,8 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
     mock_logger.info.assert_any_call("article fetching completed: total=%d", 1)
 
 
+@patch("flows.rss_ingest_flow.check_s3_object_exists_task")
+@patch("flows.rss_ingest_flow.store_to_s3_task")
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
@@ -300,18 +383,28 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
+    mock_store_to_s3_task: MagicMock,
+    mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
         "rss_urls": ["https://example.com/rss.xml"],
         "retry": {"max_retries": 3},
-        "storage": {"s3_prefix": "rss"},
+        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
             "ollama_connection_secret_block": "ollama-connection",
         },
     }
     mock_fetch_feed_task.return_value = ["https://example.com/a", "https://example.com/b"]
-    mock_fetch_article_task.side_effect = [RuntimeError("boom"), {"url": "https://example.com/b", "title": "B", "metadata": {}, "content": "ok"}]
+    mock_check_s3_object_exists_task.side_effect = [
+        {"exists": False, "id": "aaaa", "object_key": "rss/aa/aaaa.json"},
+        {"exists": False, "id": "bbbb", "object_key": "rss/bb/bbbb.json"},
+    ]
+    mock_fetch_article_task.side_effect = [
+        RuntimeError("boom"),
+        {"id": "bbbb", "url": "https://example.com/b", "title": "B", "metadata": {}, "content": "ok"},
+    ]
+    mock_store_to_s3_task.return_value = "rss/bb/bbbb.json"
 
     with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
         mock_logger = MagicMock()
@@ -324,6 +417,46 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
     assert warning_args[1] == "https://example.com/a"
     assert str(warning_args[2]) == "boom"
     mock_logger.info.assert_any_call("article fetching completed: total=%d", 1)
+
+
+@patch("flows.rss_ingest_flow.check_s3_object_exists_task")
+@patch("flows.rss_ingest_flow.store_to_s3_task")
+@patch("flows.rss_ingest_flow.fetch_article_task")
+@patch("flows.rss_ingest_flow.fetch_feed_task")
+@patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow.load_config_task")
+def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
+    mock_load_config_task: MagicMock,
+    mock_validate_prerequisites_task: MagicMock,
+    mock_fetch_feed_task: MagicMock,
+    mock_fetch_article_task: MagicMock,
+    mock_store_to_s3_task: MagicMock,
+    mock_check_s3_object_exists_task: MagicMock,
+) -> None:
+    mock_load_config_task.return_value = {
+        "rss_urls": ["https://example.com/rss.xml"],
+        "retry": {"max_retries": 3},
+        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        "prefect_blocks": {
+            "aws_credentials_block": "aws-credentials-prod",
+            "ollama_connection_secret_block": "ollama-connection",
+        },
+    }
+    mock_fetch_feed_task.return_value = ["https://example.com/a"]
+    mock_check_s3_object_exists_task.return_value = {
+        "exists": True,
+        "id": "aaaa",
+        "object_key": "rss/aa/aaaa.json",
+    }
+
+    with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
+        mock_logger = MagicMock()
+        mock_get_task_logger.return_value = mock_logger
+        rss_ingest_flow.rss_ingest_flow.fn("config.yaml")
+
+    mock_fetch_article_task.assert_not_called()
+    mock_store_to_s3_task.assert_not_called()
+    mock_logger.info.assert_any_call("article skipped by existing s3 object: total=%d", 1)
 
 
 def test_get_task_logger_returns_standard_logger_when_prefect_context_missing() -> None:
