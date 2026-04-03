@@ -103,6 +103,10 @@ def _get_aws_client_parameters(aws_credentials: AwsCredentials) -> dict[str, Any
     for key in ("endpoint_url", "config"):
         value = getattr(aws_client_parameters, key, None)
         if value is not None:
+            if key == "endpoint_url" and not isinstance(value, str):
+                continue
+            if key == "config" and not isinstance(value, (str, dict, BotocoreConfig)):
+                continue
             extracted[key] = value
     return extracted
 
