@@ -240,6 +240,12 @@ def test_build_briefing_prompt_includes_article_content() -> None:
     assert "# ニュース記事" in prompt
 
 
+def test_build_one_sentence_prompt_includes_article_content() -> None:
+    prompt = rss_ingest_flow._build_one_sentence_prompt("本文です")
+    assert "本文です" in prompt
+    assert "一文" in prompt
+
+
 @patch("flows.rss_ingest_flow.urlopen")
 def test_summarize_briefing_task_returns_ollama_response(mock_urlopen: MagicMock) -> None:
     mock_response = MagicMock()
@@ -247,6 +253,20 @@ def test_summarize_briefing_task_returns_ollama_response(mock_urlopen: MagicMock
     mock_urlopen.return_value.__enter__.return_value = mock_response
 
     summary = rss_ingest_flow.summarize_briefing_task.fn(
+        article_content="本文",
+        ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+    )
+
+    assert summary == "summary text"
+
+
+@patch("flows.rss_ingest_flow.urlopen")
+def test_summarize_one_sentence_task_returns_ollama_response(mock_urlopen: MagicMock) -> None:
+    mock_response = MagicMock()
+    mock_response.read.return_value = OLLAMA_GENERATE_RESPONSE
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    summary = rss_ingest_flow.summarize_one_sentence_task.fn(
         article_content="本文",
         ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
     )
@@ -402,6 +422,7 @@ def test_fetch_article_task_raises_when_status_is_not_200(mock_urlopen: MagicMoc
 
 @patch("flows.rss_ingest_flow.check_s3_object_exists_task")
 @patch("flows.rss_ingest_flow.store_to_s3_task")
+@patch("flows.rss_ingest_flow.summarize_one_sentence_task")
 @patch("flows.rss_ingest_flow.summarize_briefing_task")
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
@@ -415,6 +436,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
     mock_summarize_briefing_task: MagicMock,
+    mock_summarize_one_sentence_task: MagicMock,
     mock_store_to_s3_task: MagicMock,
     mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
@@ -438,6 +460,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
         {"id": "bbbb", "url": "https://example.com/b", "title": "B", "metadata": {}, "content": "ok"},
     ]
     mock_summarize_briefing_task.return_value = "summary"
+    mock_summarize_one_sentence_task.return_value = "one sentence"
     mock_store_to_s3_task.return_value = "rss/bb/bbbb.json"
 
     with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
@@ -457,6 +480,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
 
 @patch("flows.rss_ingest_flow.check_s3_object_exists_task")
 @patch("flows.rss_ingest_flow.store_to_s3_task")
+@patch("flows.rss_ingest_flow.summarize_one_sentence_task")
 @patch("flows.rss_ingest_flow.summarize_briefing_task")
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
@@ -470,6 +494,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
     mock_summarize_briefing_task: MagicMock,
+    mock_summarize_one_sentence_task: MagicMock,
     mock_store_to_s3_task: MagicMock,
     mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
@@ -493,6 +518,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
         {"id": "bbbb", "url": "https://example.com/b", "title": "B", "metadata": {}, "content": "ok"},
     ]
     mock_summarize_briefing_task.return_value = "summary"
+    mock_summarize_one_sentence_task.return_value = "one sentence"
     mock_store_to_s3_task.return_value = "rss/bb/bbbb.json"
 
     with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
@@ -510,6 +536,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
 
 @patch("flows.rss_ingest_flow.check_s3_object_exists_task")
 @patch("flows.rss_ingest_flow.store_to_s3_task")
+@patch("flows.rss_ingest_flow.summarize_one_sentence_task")
 @patch("flows.rss_ingest_flow.summarize_briefing_task")
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
@@ -523,6 +550,7 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
     mock_summarize_briefing_task: MagicMock,
+    mock_summarize_one_sentence_task: MagicMock,
     mock_store_to_s3_task: MagicMock,
     mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
@@ -550,12 +578,14 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
 
     mock_fetch_article_task.assert_not_called()
     mock_summarize_briefing_task.assert_not_called()
+    mock_summarize_one_sentence_task.assert_not_called()
     mock_store_to_s3_task.assert_not_called()
     mock_logger.info.assert_any_call("article skipped by existing s3 object: total=%d", 1)
 
 
 @patch("flows.rss_ingest_flow.check_s3_object_exists_task")
 @patch("flows.rss_ingest_flow.store_to_s3_task")
+@patch("flows.rss_ingest_flow.summarize_one_sentence_task")
 @patch("flows.rss_ingest_flow.summarize_briefing_task")
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
@@ -569,6 +599,7 @@ def test_rss_ingest_flow_skips_article_when_summarization_fails(
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
     mock_summarize_briefing_task: MagicMock,
+    mock_summarize_one_sentence_task: MagicMock,
     mock_store_to_s3_task: MagicMock,
     mock_check_s3_object_exists_task: MagicMock,
 ) -> None:

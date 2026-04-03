@@ -83,8 +83,8 @@ storage:
 - `fetch_timestamp`
 - `content`（本文抽出テキスト。Trafilatura を優先利用）
 - `raw_html`
-- `briefing_summary`
-- `one_sentence_summary`
+- `briefing_summary`（Ollama によるブリーフィング要約）
+- `one_sentence_summary`（Ollama による1文要約）
 
 ### 3.3 JSON 例
 
