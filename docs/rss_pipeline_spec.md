@@ -24,7 +24,11 @@ retry:
   backoff_multiplier: 2
 
 storage:
+  s3_bucket: news-bucket
   s3_prefix: rss
+
+ollama:
+  request_timeout_sec: 120
 ```
 
 ### 1.3 キー定義
@@ -37,7 +41,10 @@ storage:
   - `initial_delay_sec`（任意, 整数）: 初回リトライ待機秒。
   - `backoff_multiplier`（任意, 数値）: 指数バックオフ係数。
 - `storage`（必須）
+  - `s3_bucket`（必須, 文字列）: S3互換ストレージのバケット名。
   - `s3_prefix`（必須, 文字列）: S3保存時のプレフィックス。
+- `ollama`（任意）
+  - `request_timeout_sec`（任意, 正の整数）: Ollama API呼び出しタイムアウト秒。未指定時は120秒。
 
 ### 1.4 バリデーション要件
 - `rss_urls` が空配列または未定義の場合、フローは開始時点で `FAILED` とする。
@@ -74,14 +81,15 @@ storage:
 - JSON Lines / 連結レコード形式は採用しない（ファイル肥大化回避）。
 
 ### 3.2 JSON 必須キー
-以下7キーを必須とする:
+以下8キーを必須とする:
 - `url`
 - `title`
 - `published_timestamp`
 - `fetch_timestamp`
-- `content`
-- `briefing_summary`
-- `one_sentence_summary`
+- `content`（本文抽出テキスト。Trafilatura を優先利用）
+- `raw_html`
+- `briefing_summary`（Ollama によるブリーフィング要約）
+- `one_sentence_summary`（Ollama による1文要約）
 
 ### 3.3 JSON 例
 
@@ -92,6 +100,7 @@ storage:
   "published_timestamp": "2026-04-01T12:34:56Z",
   "fetch_timestamp": "2026-04-02T00:00:00Z",
   "content": "記事本文（抽出済みテキスト）",
+  "raw_html": "<!doctype html>...",
   "briefing_summary": "複数段落の要約（ブリーフィング向け）",
   "one_sentence_summary": "1文要約",
   "metadata": {
@@ -109,6 +118,7 @@ storage:
 - `metadata` は任意拡張オブジェクトとして保持する。
 - RSS/Atom や本文抽出から取得可能な属性を「可能な限り」格納する。
   - 例: `source_feed_url`, `author`, `categories/tags`, `language`, `image_url`, `entry_id`, `updated_timestamp`, `site_name` など。
+- 本文抽出は Trafilatura を優先し、抽出不可時はフォールバック手法で本文を補完する。
 
 ### 3.5 S3 保存パス
 記事 URL の MD5 を `url_md5` としたとき、以下に保存する。
@@ -125,6 +135,7 @@ storage:
 - 1フィード当たりの最大取得件数は設定で定義しない。
 - 各フィードに含まれる全リンク（全エントリ）を取得対象とする。
 - 実装上の安全策として、異常に大量な場合は運用ガード（タイムアウトや総処理時間制限）を別途設けてもよいが、設定項目として `max_entries` は持たない。
+- 記事URLのMD5から導出されるS3オブジェクトが既に存在する場合、当該記事の本文取得・要約・保存は再実行せず `SKIPPED` とする。
 
 ---
 

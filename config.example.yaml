@@ -8,7 +8,11 @@ retry:
   backoff_multiplier: 2
 
 storage:
+  s3_bucket: news-bucket
   s3_prefix: rss
+
+ollama:
+  request_timeout_sec: 120
 
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod

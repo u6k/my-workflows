@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -9,10 +11,12 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 import yaml
+from botocore.config import Config as BotocoreConfig
 from prefect import flow, get_run_logger, task
 from prefect.blocks.system import Secret
 from prefect.exceptions import MissingContextError
 from prefect_aws.credentials import AwsCredentials
+import trafilatura
 
 
 REQUIRED_PREFECT_BLOCK_KEYS = (
@@ -23,6 +27,19 @@ REQUIRED_OLLAMA_CONNECTION_KEYS = (
     "base_url",
     "model",
 )
+BRIEFING_PROMPT_TEMPLATE = """以下のニュース記事から主要なテーマとアイデアを統合した包括的なブリーフィングドキュメントを作成してください。まずは、最も重要なポイントを簡潔にまとめたエグゼクティブサマリーから始めましょう。本文では、情報源に含まれる主要なテーマ、証拠、そして結論を​​詳細かつ徹底的に検証する必要があります。分析は、明瞭性を確保するために、見出しと箇条書きを用いて論理的に構成する必要があります。トーンは客観的かつ鋭いものでなければなりません。
+
+# ニュース記事
+```txt
+{article_content}
+```"""
+ONE_SENTENCE_PROMPT_TEMPLATE = """以下のニュース記事を、内容が過不足なく伝わるように「一文」で要約してください。
+余計な解説は不要です。
+
+# ニュース記事
+```txt
+{article_content}
+```"""
 
 
 def _load_yaml_config(config_path: str) -> dict[str, Any]:
@@ -70,6 +87,10 @@ def _validate_config(config: dict[str, Any]) -> None:
     if not isinstance(s3_prefix, str) or not s3_prefix:
         raise ValueError("config.storage.s3_prefix must be a non-empty string")
 
+    s3_bucket = storage.get("s3_bucket")
+    if not isinstance(s3_bucket, str) or not s3_bucket:
+        raise ValueError("config.storage.s3_bucket must be a non-empty string")
+
     prefect_blocks = config.get("prefect_blocks")
     if not isinstance(prefect_blocks, dict):
         raise ValueError("config.prefect_blocks must be an object")
@@ -85,6 +106,15 @@ def _validate_config(config: dict[str, Any]) -> None:
     ]
     if invalid_block_names:
         raise ValueError(f"config.prefect_blocks values must be non-empty strings: {', '.join(invalid_block_names)}")
+
+    ollama = config.get("ollama")
+    if ollama is not None:
+        if not isinstance(ollama, dict):
+            raise ValueError("config.ollama must be an object")
+
+        request_timeout_sec = ollama.get("request_timeout_sec")
+        if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
+            raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
 
 
 def _get_task_logger() -> logging.Logger:
@@ -107,6 +137,82 @@ def _normalize_extracted_link(link: str) -> str:
     parsed = urlparse(link)
     query = parse_qs(parsed.query)
     return query.get("url", [link])[0]
+
+
+def _url_to_md5(url: str) -> str:
+    return hashlib.md5(url.encode("utf-8")).hexdigest()
+
+
+def _build_s3_object_key(s3_prefix: str, article_id: str) -> str:
+    normalized_prefix = s3_prefix.strip("/")
+    return f"{normalized_prefix}/{article_id[:2]}/{article_id}.json"
+
+
+def _get_aws_client_parameters(aws_credentials: AwsCredentials) -> dict[str, Any]:
+    aws_client_parameters = getattr(aws_credentials, "aws_client_parameters", None)
+    if aws_client_parameters is None:
+        return {}
+
+    if hasattr(aws_client_parameters, "get_params_override"):
+        params_override = aws_client_parameters.get_params_override()
+        if isinstance(params_override, dict):
+            return params_override
+
+    if isinstance(aws_client_parameters, dict):
+        return aws_client_parameters
+
+    extracted: dict[str, Any] = {}
+    for key in ("endpoint_url", "config"):
+        value = getattr(aws_client_parameters, key, None)
+        if value is not None:
+            extracted[key] = value
+    return extracted
+
+
+def _normalize_botocore_config(raw_config: Any) -> BotocoreConfig | None:
+    if raw_config is None:
+        return None
+
+    if isinstance(raw_config, BotocoreConfig):
+        return raw_config
+
+    normalized_config = raw_config
+    if isinstance(raw_config, str):
+        normalized_config = raw_config.strip()
+        if normalized_config == "":
+            return None
+        try:
+            normalized_config = json.loads(normalized_config)
+        except json.JSONDecodeError as exc:
+            raise ValueError("aws_client_parameters.config must be valid JSON when provided as a string") from exc
+
+    if not isinstance(normalized_config, dict):
+        raise ValueError("aws_client_parameters.config must be a dict, JSON string, or botocore Config")
+
+    return BotocoreConfig(**normalized_config)
+
+
+def _create_s3_client(aws_credentials: AwsCredentials) -> Any:
+    client_kwargs: dict[str, Any] = {}
+    client_parameters = _get_aws_client_parameters(aws_credentials)
+
+    endpoint_url = client_parameters.get("endpoint_url")
+    if isinstance(endpoint_url, str) and endpoint_url:
+        client_kwargs["endpoint_url"] = endpoint_url
+
+    config = _normalize_botocore_config(client_parameters.get("config"))
+    if config is not None:
+        client_kwargs["config"] = config
+
+    return aws_credentials.get_boto3_session().client("s3", **client_kwargs)
+
+
+def _build_briefing_prompt(article_content: str) -> str:
+    return BRIEFING_PROMPT_TEMPLATE.format(article_content=article_content)
+
+
+def _build_one_sentence_prompt(article_content: str) -> str:
+    return ONE_SENTENCE_PROMPT_TEMPLATE.format(article_content=article_content)
 
 
 def _extract_links_from_feed_xml(feed_xml: bytes) -> list[str]:
@@ -235,7 +341,20 @@ def _extract_article_content_and_metadata(article_html: str) -> dict[str, Any]:
     if tags:
         metadata["tags"] = tags
 
-    content = "\n".join(parser.visible_text_parts).strip()
+    extracted_content = trafilatura.extract(
+        article_html,
+        output_format="txt",
+        include_comments=False,
+        include_tables=False,
+        deduplicate=True,
+    )
+    if isinstance(extracted_content, str):
+        content = extracted_content.strip()
+    else:
+        content = ""
+
+    if not content:
+        content = "\n".join(parser.visible_text_parts).strip()
 
     return {
         "title": parser.title or "",
@@ -279,7 +398,98 @@ def fetch_article_task(article_url: str) -> dict[str, Any]:
     article_html = raw_html.decode(content_type, errors="replace")
     extracted = _extract_article_content_and_metadata(article_html)
     extracted["url"] = article_url
+    extracted["id"] = _url_to_md5(article_url)
+    extracted["raw_html"] = article_html
     return extracted
+
+
+@task(name="store_to_s3_task")
+def store_to_s3_task(article: dict[str, Any], storage: dict[str, Any], aws_credentials_block_name: str) -> str:
+    article_id = article["id"]
+    object_key = _build_s3_object_key(storage["s3_prefix"], article_id)
+
+    aws_credentials = AwsCredentials.load(aws_credentials_block_name)
+    s3_client = _create_s3_client(aws_credentials)
+    s3_client.put_object(
+        Bucket=storage["s3_bucket"],
+        Key=object_key,
+        Body=json.dumps(article, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+    return object_key
+
+
+@task(name="check_s3_object_exists_task")
+def check_s3_object_exists_task(article_url: str, storage: dict[str, Any], aws_credentials_block_name: str) -> dict[str, Any]:
+    article_id = _url_to_md5(article_url)
+    object_key = _build_s3_object_key(storage["s3_prefix"], article_id)
+
+    aws_credentials = AwsCredentials.load(aws_credentials_block_name)
+    s3_client = _create_s3_client(aws_credentials)
+    try:
+        s3_client.head_object(Bucket=storage["s3_bucket"], Key=object_key)
+        return {"exists": True, "id": article_id, "object_key": object_key}
+    except Exception as exc:
+        response = getattr(exc, "response", {})
+        error = response.get("Error", {})
+        error_code = str(error.get("Code", ""))
+        if error_code in {"404", "NoSuchKey", "NotFound"}:
+            return {"exists": False, "id": article_id, "object_key": object_key}
+        raise
+
+
+@task(name="summarize_briefing_task")
+def summarize_briefing_task(article_content: str, ollama_connection: dict[str, str], timeout_sec: int = 120) -> str:
+    logger = _get_task_logger()
+    prompt = _build_briefing_prompt(article_content)
+    logger.debug("ollama briefing prompt: %s", prompt)
+
+    payload = {
+        "model": ollama_connection["model"],
+        "prompt": prompt,
+        "stream": False,
+    }
+    request = Request(
+        f"{ollama_connection['base_url'].rstrip('/')}/api/generate",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout_sec) as response:
+        body = response.read().decode("utf-8")
+    response_json = json.loads(body)
+    summary = response_json.get("response", "").strip()
+    logger.debug("ollama briefing response: %s", summary)
+    if not summary:
+        raise ValueError("Ollama response does not contain summary text")
+    return summary
+
+
+@task(name="summarize_one_sentence_task")
+def summarize_one_sentence_task(article_content: str, ollama_connection: dict[str, str], timeout_sec: int = 120) -> str:
+    logger = _get_task_logger()
+    prompt = _build_one_sentence_prompt(article_content)
+    logger.debug("ollama one-sentence prompt: %s", prompt)
+
+    payload = {
+        "model": ollama_connection["model"],
+        "prompt": prompt,
+        "stream": False,
+    }
+    request = Request(
+        f"{ollama_connection['base_url'].rstrip('/')}/api/generate",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout_sec) as response:
+        body = response.read().decode("utf-8")
+    response_json = json.loads(body)
+    summary = response_json.get("response", "").strip()
+    logger.debug("ollama one-sentence response: %s", summary)
+    if not summary:
+        raise ValueError("Ollama response does not contain one sentence summary text")
+    return summary
 
 
 @task(name="load_config_task")
@@ -325,6 +535,8 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
 
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
+    ollama_connection = Secret.load(config["prefect_blocks"]["ollama_connection_secret_block"]).get()
+    ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
 
     all_links: list[str] = []
     for feed_url in list(dict.fromkeys(config["rss_urls"])):
@@ -339,23 +551,68 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     logger.info("feed links extracted: total=%d unique=%d", len(all_links), len(unique_links))
 
     article_count = 0
+    stored_count = 0
+    skipped_existing_count = 0
     for link in unique_links:
+        s3_lookup = check_s3_object_exists_task(
+            article_url=link,
+            storage=config["storage"],
+            aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
+        )
+        if s3_lookup["exists"]:
+            logger.info(
+                "article already exists in s3, skip fetch/summarize: id=%s url=%s s3://%s/%s",
+                s3_lookup["id"],
+                link,
+                config["storage"]["s3_bucket"],
+                s3_lookup["object_key"],
+            )
+            skipped_existing_count += 1
+            continue
+
         try:
             article = fetch_article_task(link)
         except Exception as exc:
             logger.warning("article fetch skipped: url=%s reason=%s", link, exc)
             continue
 
+        try:
+            article["briefing_summary"] = summarize_briefing_task(
+                article_content=article["content"],
+                ollama_connection=ollama_connection,
+                timeout_sec=ollama_timeout_sec,
+            )
+            article["one_sentence_summary"] = summarize_one_sentence_task(
+                article_content=article["content"],
+                ollama_connection=ollama_connection,
+                timeout_sec=ollama_timeout_sec,
+            )
+        except Exception as exc:
+            logger.warning("article summarize skipped: url=%s reason=%s", link, exc)
+            continue
+
+        object_key = store_to_s3_task(
+            article=article,
+            storage=config["storage"],
+            aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
+        )
+
         logger.debug(
-            "article fetched: url=%s title=%s metadata=%s content_length=%d",
+            "article fetched and stored: id=%s url=%s s3://%s/%s title=%s metadata=%s content_length=%d",
+            article["id"],
             article["url"],
+            config["storage"]["s3_bucket"],
+            object_key,
             article["title"],
             article["metadata"],
             len(article["content"]),
         )
         article_count += 1
+        stored_count += 1
 
     logger.info("article fetching completed: total=%d", article_count)
+    logger.info("article storing completed: total=%d", stored_count)
+    logger.info("article skipped by existing s3 object: total=%d", skipped_existing_count)
 
 
 if __name__ == "__main__":
