@@ -11,6 +11,10 @@ storage:
   s3_bucket: news-bucket
   s3_prefix: rss
 
+# daily-news-blog-digest-flow で target_date 未指定時に利用される日付（YYYY-MM-DD）
+# 省略時は実行日のUTC日付
+target_date: "2026-04-02"
+
 ollama:
   request_timeout_sec: 120
 

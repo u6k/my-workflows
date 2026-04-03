@@ -13,9 +13,9 @@ from prefect_aws.credentials import AwsCredentials
 
 if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parent))
-    from common import create_s3_client, load_yaml_config
+    from common import create_s3_client, invoke_ollama_generate, load_ollama_connection_secret, load_yaml_config
 else:
-    from .common import create_s3_client, load_yaml_config
+    from .common import create_s3_client, invoke_ollama_generate, load_ollama_connection_secret, load_yaml_config
 
 
 def _get_task_logger() -> logging.Logger:
@@ -50,6 +50,19 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
     if not isinstance(aws_credentials_block, str) or not aws_credentials_block:
         raise ValueError("config.prefect_blocks.aws_credentials_block must be a non-empty string")
 
+    ollama_connection_secret_block = prefect_blocks.get("ollama_connection_secret_block")
+    if not isinstance(ollama_connection_secret_block, str) or not ollama_connection_secret_block:
+        raise ValueError("config.prefect_blocks.ollama_connection_secret_block must be a non-empty string")
+
+    ollama = config.get("ollama")
+    if ollama is not None:
+        if not isinstance(ollama, dict):
+            raise ValueError("config.ollama must be an object")
+
+        request_timeout_sec = ollama.get("request_timeout_sec")
+        if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
+            raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
+
 
 def _parse_target_date(target_date: str) -> date:
     try:
@@ -76,6 +89,58 @@ def _resolve_target_date(target_date: str | None, config: dict[str, Any]) -> str
 
 def _create_s3_client(aws_credentials: AwsCredentials) -> Any:
     return create_s3_client(aws_credentials)
+
+
+def _build_macro_theme_prompt(articles: list[dict[str, str]]) -> str:
+    articles_json = json.dumps(articles, ensure_ascii=False, indent=2)
+    return f"""あなたはニュース記事のテーマ設計者です。目的は、個別記事を分類するための「マクロテーマ体系」を作ることです。
+
+# 制約
+- テーマ数は6〜12個
+- テーマ同士はできるだけ重複させない
+- 粒度を揃える
+- 「AI」や「テクノロジー」のような広すぎるテーマは禁止
+- できるだけ実務で使える分類軸にする
+- それでも分類不能な記事のために "UNCLASSIFIABLE" を設ける
+- 出力はJSONのみ
+
+# 入力データの要素
+各記事には以下の要素がある
+- title
+- one_sentence_summary
+
+# タスク
+1. 記事群全体を見て、6〜12個のマクロテーマを提案する
+2. 各テーマについて以下を出力する
+   - theme_id
+   - theme_name
+   - description
+   - include_rules
+   - exclude_rules
+   - example_keywords
+3. 似ているテーマがある場合は統合する
+4. 粒度が揃っていない場合は修正する
+5. 最後に、全体を100字以内で説明する
+
+# 出力JSONスキーマ
+{{
+  "taxonomy_summary": "string",
+  "themes": [
+    {{
+      "theme_id": "T01",
+      "theme_name": "string",
+      "description": "string",
+      "include_rules": ["string"],
+      "exclude_rules": ["string"],
+      "example_keywords": ["string"]
+    }}
+  ],
+  "unclassifiable_rule": "string"
+}}
+
+# 入力データ
+{articles_json}
+"""
 
 
 @task(name="load_daily_digest_config_task")
@@ -158,18 +223,66 @@ def fetch_daily_articles_from_s3_task(
     return matched_articles
 
 
+@task(name="design_macro_themes_with_ollama_task")
+def design_macro_themes_with_ollama_task(
+    articles: list[dict[str, Any]],
+    ollama_connection: dict[str, str],
+    timeout_sec: int = 120,
+) -> dict[str, Any]:
+    logger = _get_task_logger()
+    compact_articles = [
+        {
+            "title": article["title"],
+            "one_sentence_summary": article["one_sentence_summary"],
+        }
+        for article in articles
+        if isinstance(article.get("title"), str)
+        and article["title"]
+        and isinstance(article.get("one_sentence_summary"), str)
+        and article["one_sentence_summary"]
+    ]
+    if not compact_articles:
+        raise ValueError("articles must include at least one valid title and one_sentence_summary pair")
+
+    prompt = _build_macro_theme_prompt(compact_articles)
+    logger.info("send macro-theme prompt to ollama: article_count=%d", len(compact_articles))
+    raw_response = invoke_ollama_generate(
+        ollama_connection=ollama_connection,
+        prompt=prompt,
+        timeout_sec=timeout_sec,
+        response_format="json",
+        logger=logger,
+    )
+    logger.info("received macro-theme response from ollama")
+    if not raw_response:
+        raise ValueError("Ollama response does not contain taxonomy JSON text")
+
+    taxonomy = json.loads(raw_response)
+    if not isinstance(taxonomy, dict):
+        raise ValueError("Ollama taxonomy response must be a JSON object")
+    logger.info("design_macro_themes_with_ollama_task result: %s", taxonomy)
+    return taxonomy
+
+
 @flow(name="daily-news-blog-digest-flow")
-def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str = "config.yaml") -> list[dict[str, Any]]:
+def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str = "config.yaml") -> dict[str, Any]:
     logger = _get_task_logger()
 
     config = load_daily_digest_config_task(config_path)
     resolved_target_date = _resolve_target_date(target_date, config)
     logger.info("daily-news-blog-digest-flow start: target_date=%s", resolved_target_date)
 
-    return fetch_daily_articles_from_s3_task(
+    articles = fetch_daily_articles_from_s3_task(
         target_date=resolved_target_date,
         storage=config["storage"],
         aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
+    )
+    ollama_connection = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
+    ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
+    return design_macro_themes_with_ollama_task(
+        articles=articles,
+        ollama_connection=ollama_connection,
+        timeout_sec=ollama_timeout_sec,
     )
 
 

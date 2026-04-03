@@ -12,25 +12,20 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 from prefect import flow, get_run_logger, task
-from prefect.blocks.system import Secret
 from prefect.exceptions import MissingContextError
 from prefect_aws.credentials import AwsCredentials
 import trafilatura
 
 if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parent))
-    from common import create_s3_client, load_yaml_config
+    from common import create_s3_client, invoke_ollama_generate, load_ollama_connection_secret, load_yaml_config
 else:
-    from .common import create_s3_client, load_yaml_config
+    from .common import create_s3_client, invoke_ollama_generate, load_ollama_connection_secret, load_yaml_config
 
 
 REQUIRED_PREFECT_BLOCK_KEYS = (
     "aws_credentials_block",
     "ollama_connection_secret_block",
-)
-REQUIRED_OLLAMA_CONNECTION_KEYS = (
-    "base_url",
-    "model",
 )
 BRIEFING_PROMPT_TEMPLATE = """以下のニュース記事から主要なテーマとアイデアを統合した包括的なブリーフィングドキュメントを作成してください。まずは、最も重要なポイントを簡潔にまとめたエグゼクティブサマリーから始めましょう。本文では、情報源に含まれる主要なテーマ、証拠、そして結論を​​詳細かつ徹底的に検証する必要があります。分析は、明瞭性を確保するために、見出しと箇条書きを用いて論理的に構成する必要があります。トーンは客観的かつ鋭いものでなければなりません。
 
@@ -383,22 +378,12 @@ def summarize_briefing_task(article_content: str, ollama_connection: dict[str, s
     logger = _get_task_logger()
     prompt = _build_briefing_prompt(article_content)
     logger.debug("ollama briefing prompt: %s", prompt)
-
-    payload = {
-        "model": ollama_connection["model"],
-        "prompt": prompt,
-        "stream": False,
-    }
-    request = Request(
-        f"{ollama_connection['base_url'].rstrip('/')}/api/generate",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    summary = invoke_ollama_generate(
+        ollama_connection=ollama_connection,
+        prompt=prompt,
+        timeout_sec=timeout_sec,
+        logger=logger,
     )
-    with urlopen(request, timeout=timeout_sec) as response:
-        body = response.read().decode("utf-8")
-    response_json = json.loads(body)
-    summary = response_json.get("response", "").strip()
     logger.debug("ollama briefing response: %s", summary)
     if not summary:
         raise ValueError("Ollama response does not contain summary text")
@@ -410,22 +395,12 @@ def summarize_one_sentence_task(article_content: str, ollama_connection: dict[st
     logger = _get_task_logger()
     prompt = _build_one_sentence_prompt(article_content)
     logger.debug("ollama one-sentence prompt: %s", prompt)
-
-    payload = {
-        "model": ollama_connection["model"],
-        "prompt": prompt,
-        "stream": False,
-    }
-    request = Request(
-        f"{ollama_connection['base_url'].rstrip('/')}/api/generate",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    summary = invoke_ollama_generate(
+        ollama_connection=ollama_connection,
+        prompt=prompt,
+        timeout_sec=timeout_sec,
+        logger=logger,
     )
-    with urlopen(request, timeout=timeout_sec) as response:
-        body = response.read().decode("utf-8")
-    response_json = json.loads(body)
-    summary = response_json.get("response", "").strip()
     logger.debug("ollama one-sentence response: %s", summary)
     if not summary:
         raise ValueError("Ollama response does not contain one sentence summary text")
@@ -454,19 +429,7 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
     logger.info("Prefect block loaded: key=aws_credentials_block name=%s", aws_credentials_block)
 
     ollama_secret_block = block_config["ollama_connection_secret_block"]
-    ollama_secret_value = Secret.load(ollama_secret_block).get()
-    logger.info("Prefect secret loaded: key=ollama_connection_secret_block name=%s", ollama_secret_block)
-
-    if not isinstance(ollama_secret_value, dict):
-        raise ValueError("Ollama Secret block value must be a dict")
-
-    ollama_connection = ollama_secret_value
-
-    missing_ollama_keys = [
-        key for key in REQUIRED_OLLAMA_CONNECTION_KEYS if not isinstance(ollama_connection.get(key), str) or not ollama_connection[key]
-    ]
-    if missing_ollama_keys:
-        raise ValueError(f"Ollama Secret JSON is missing required keys: {', '.join(missing_ollama_keys)}")
+    load_ollama_connection_secret(ollama_secret_block, logger=logger)
 
 
 @flow(name="rss_ingest_flow")
@@ -475,7 +438,7 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
 
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
-    ollama_connection = Secret.load(config["prefect_blocks"]["ollama_connection_secret_block"]).get()
+    ollama_connection = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
 
     all_links: list[str] = []

@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
+from urllib.request import Request, urlopen
 
 import yaml
 from botocore.config import Config as BotocoreConfig
+from prefect.blocks.system import Secret
 from prefect_aws.credentials import AwsCredentials
+
+REQUIRED_OLLAMA_CONNECTION_KEYS = (
+    "base_url",
+    "model",
+)
 
 
 def load_yaml_config(config_path: str) -> dict[str, Any]:
@@ -84,3 +92,60 @@ def create_s3_client(aws_credentials: AwsCredentials) -> Any:
         client_kwargs["config"] = config
 
     return aws_credentials.get_boto3_session().client("s3", **client_kwargs)
+
+
+def validate_ollama_connection(ollama_connection: Any) -> dict[str, str]:
+    if not isinstance(ollama_connection, dict):
+        raise ValueError("Ollama Secret block value must be a dict")
+
+    missing_ollama_keys = [
+        key for key in REQUIRED_OLLAMA_CONNECTION_KEYS if not isinstance(ollama_connection.get(key), str) or not ollama_connection[key]
+    ]
+    if missing_ollama_keys:
+        raise ValueError(f"Ollama Secret JSON is missing required keys: {', '.join(missing_ollama_keys)}")
+
+    return {
+        "base_url": ollama_connection["base_url"],
+        "model": ollama_connection["model"],
+    }
+
+
+def load_ollama_connection_secret(secret_block_name: str, logger: logging.Logger | None = None) -> dict[str, str]:
+    ollama_secret_value = Secret.load(secret_block_name).get()
+    if logger is not None:
+        logger.info("Prefect secret loaded: key=ollama_connection_secret_block name=%s", secret_block_name)
+    return validate_ollama_connection(ollama_secret_value)
+
+
+def invoke_ollama_generate(
+    ollama_connection: dict[str, str],
+    prompt: str,
+    timeout_sec: int = 120,
+    response_format: str | None = None,
+    logger: logging.Logger | None = None,
+) -> str:
+    if logger is not None:
+        logger.info("ollama prompt: %s", prompt)
+
+    payload: dict[str, Any] = {
+        "model": ollama_connection["model"],
+        "prompt": prompt,
+        "stream": False,
+    }
+    if response_format is not None:
+        payload["format"] = response_format
+
+    request = Request(
+        f"{ollama_connection['base_url'].rstrip('/')}/api/generate",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout_sec) as response:
+        body = response.read().decode("utf-8")
+
+    response_json = json.loads(body)
+    response_text = str(response_json.get("response", "")).strip()
+    if logger is not None:
+        logger.info("ollama response: %s", response_text)
+    return response_text
