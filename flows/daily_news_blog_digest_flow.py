@@ -84,27 +84,60 @@ def fetch_daily_articles_from_s3_task(
     s3_client = _create_s3_client(aws_credentials)
 
     matched_articles: list[dict[str, Any]] = []
+    matched_object_logs: list[dict[str, Any]] = []
     paginator = s3_client.get_paginator("list_objects_v2")
     pages = paginator.paginate(Bucket=storage["s3_bucket"], Prefix=storage["s3_prefix"].strip("/"))
 
     for page in pages:
         for obj in page.get("Contents", []):
+            object_key = obj["Key"]
+            s3_path = f"s3://{storage['s3_bucket']}/{object_key}"
+            size = int(obj.get("Size", 0))
             last_modified = obj["LastModified"]
             if last_modified.tzinfo is None:
                 last_modified = last_modified.replace(tzinfo=timezone.utc)
             else:
                 last_modified = last_modified.astimezone(timezone.utc)
 
+            logger.debug(
+                "checking s3 object: path=%s last_modified=%s data_length=%d",
+                s3_path,
+                last_modified.isoformat(),
+                size,
+            )
             if not (day_start <= last_modified < day_end):
+                logger.debug(
+                    "skip s3 object by target_date: path=%s last_modified=%s data_length=%d",
+                    s3_path,
+                    last_modified.isoformat(),
+                    size,
+                )
                 continue
 
-            object_key = obj["Key"]
-            s3_path = f"s3://{storage['s3_bucket']}/{object_key}"
             logger.info("target S3 data fetch path: %s", s3_path)
 
             response = s3_client.get_object(Bucket=storage["s3_bucket"], Key=object_key)
-            body = response["Body"].read().decode("utf-8")
+            body_raw = response["Body"].read()
+            body = body_raw.decode("utf-8")
+            data_length = len(body_raw)
+            logger.debug("downloaded s3 object: path=%s downloaded data_length=%d", s3_path, data_length)
+
             matched_articles.append(json.loads(body))
+            matched_object_logs.append(
+                {
+                    "s3_path": s3_path,
+                    "last_modified": last_modified.isoformat(),
+                    "data_length": data_length,
+                }
+            )
+
+    for matched in matched_object_logs:
+        logger.info(
+            "matched s3 object: path=%s last_modified=%s data_length=%d",
+            matched["s3_path"],
+            matched["last_modified"],
+            matched["data_length"],
+        )
 
     return matched_articles
 

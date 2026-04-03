@@ -62,9 +62,15 @@ def test_fetch_daily_articles_from_s3_task_filters_by_target_date(mock_aws_crede
         Bucket="news-bucket",
         Prefix="rss",
     )
-    mock_logger.info.assert_called_with(
+    mock_logger.info.assert_any_call(
         "target S3 data fetch path: %s",
         "s3://news-bucket/rss/2026-04-02/aa/20260402-a.json",
+    )
+    mock_logger.info.assert_any_call(
+        "matched s3 object: path=%s last_modified=%s data_length=%d",
+        "s3://news-bucket/rss/2026-04-02/aa/20260402-a.json",
+        "2026-04-02T00:10:00+00:00",
+        10,
     )
 
 
