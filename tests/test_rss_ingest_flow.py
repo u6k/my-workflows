@@ -130,6 +130,30 @@ ATOM_XML = b"""<?xml version="1.0" encoding="utf-8"?>
 """
 
 
+ARTICLE_HTML = b"""<!doctype html>
+<html>
+  <head>
+    <title>Example title</title>
+    <meta property="og:site_name" content="Example Site">
+    <meta property="og:image" content="https://example.com/image.jpg">
+    <meta property="article:published_time" content="2026-04-01T12:34:56Z">
+    <meta property="article:tag" content="ai">
+    <meta name="author" content="Jane Doe">
+    <meta name="keywords" content="tech,python">
+    <meta name="language" content="ja">
+  </head>
+  <body>
+    <article>
+      <h1>Heading</h1>
+      <p>Paragraph A.</p>
+      <p>Paragraph B.</p>
+    </article>
+    <script>ignored()</script>
+  </body>
+</html>
+"""
+
+
 def test_extract_links_from_feed_xml_supports_rss_and_deduplicates() -> None:
     links = rss_ingest_flow._extract_links_from_feed_xml(RSS_XML)
 
@@ -187,11 +211,41 @@ def test_fetch_feed_task_raises_when_no_entries(
     )
 
 
-@patch("flows.rss_ingest_flow.get_run_logger")
-def test_get_task_logger_returns_standard_logger_when_prefect_context_missing(mock_get_run_logger: MagicMock) -> None:
-    mock_get_run_logger.side_effect = rss_ingest_flow.MissingContextError("missing")
+def test_extract_article_content_and_metadata() -> None:
+    extracted = rss_ingest_flow._extract_article_content_and_metadata(ARTICLE_HTML.decode("utf-8"))
 
-    logger = rss_ingest_flow._get_task_logger()
+    assert extracted["title"] == "Example title"
+    assert "Heading" in extracted["content"]
+    assert "ignored()" not in extracted["content"]
+    assert extracted["metadata"] == {
+        "author": "Jane Doe",
+        "image_url": "https://example.com/image.jpg",
+        "language": "ja",
+        "published_timestamp": "2026-04-01T12:34:56Z",
+        "site_name": "Example Site",
+        "tags": ["ai", "python", "tech"],
+    }
+
+
+@patch("flows.rss_ingest_flow.urlopen")
+def test_fetch_article_task_returns_content_and_metadata(mock_urlopen: MagicMock) -> None:
+    mock_response = MagicMock()
+    mock_response.read.return_value = ARTICLE_HTML
+    mock_response.headers.get_content_charset.return_value = "utf-8"
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    article = rss_ingest_flow.fetch_article_task.fn("https://example.com/posts/1")
+
+    assert article["url"] == "https://example.com/posts/1"
+    assert article["title"] == "Example title"
+    assert "Paragraph A." in article["content"]
+    assert article["metadata"]["author"] == "Jane Doe"
+    assert article["metadata"]["tags"] == ["ai", "python", "tech"]
+
+
+def test_get_task_logger_returns_standard_logger_when_prefect_context_missing() -> None:
+    with patch("flows.rss_ingest_flow.get_run_logger", side_effect=rss_ingest_flow.MissingContextError("missing")):
+        logger = rss_ingest_flow._get_task_logger()
 
     assert logger.name == "flows.rss_ingest_flow"
 
