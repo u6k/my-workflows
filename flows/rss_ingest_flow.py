@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 import yaml
@@ -86,15 +87,12 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise ValueError(f"config.prefect_blocks values must be non-empty strings: {', '.join(invalid_block_names)}")
 
 
-
-
-
-
 def _get_task_logger() -> logging.Logger:
     try:
         return get_run_logger()
     except MissingContextError:
         return logging.getLogger(__name__)
+
 
 def _local_name(tag: str) -> str:
     if "}" in tag:
@@ -150,6 +148,102 @@ def _extract_links_from_feed_xml(feed_xml: bytes) -> list[str]:
     return unique_links
 
 
+class _ArticleHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.in_title = False
+        self.skip_depth = 0
+        self.title: str | None = None
+        self.visible_text_parts: list[str] = []
+        self.metadata: dict[str, Any] = {"tags": []}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_dict = {k.lower(): (v or "") for k, v in attrs}
+        lower_tag = tag.lower()
+
+        if lower_tag in {"script", "style", "noscript"}:
+            self.skip_depth += 1
+            return
+
+        if lower_tag == "title":
+            self.in_title = True
+            return
+
+        if lower_tag != "meta":
+            return
+
+        property_name = attrs_dict.get("property", "").lower()
+        name = attrs_dict.get("name", "").lower()
+        content = attrs_dict.get("content", "").strip()
+        if not content:
+            return
+
+        if property_name == "og:title" and not self.title:
+            self.title = content
+        elif property_name == "og:site_name":
+            self.metadata["site_name"] = content
+        elif property_name == "og:image":
+            self.metadata["image_url"] = content
+        elif property_name == "article:published_time":
+            self.metadata["published_timestamp"] = content
+        elif property_name == "article:modified_time":
+            self.metadata["updated_timestamp"] = content
+        elif property_name == "article:tag":
+            self.metadata["tags"].append(content)
+
+        if name == "author":
+            self.metadata["author"] = content
+        elif name == "keywords":
+            keywords = [tag.strip() for tag in content.split(",") if tag.strip()]
+            self.metadata["tags"].extend(keywords)
+        elif name in {"lang", "language"}:
+            self.metadata["language"] = content
+
+    def handle_endtag(self, tag: str) -> None:
+        lower_tag = tag.lower()
+        if lower_tag in {"script", "style", "noscript"} and self.skip_depth > 0:
+            self.skip_depth -= 1
+            return
+
+        if lower_tag == "title":
+            self.in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self.skip_depth > 0:
+            return
+
+        text = data.strip()
+        if not text:
+            return
+
+        if self.in_title:
+            if self.title:
+                self.title = f"{self.title} {text}".strip()
+            else:
+                self.title = text
+            return
+
+        self.visible_text_parts.append(text)
+
+
+def _extract_article_content_and_metadata(article_html: str) -> dict[str, Any]:
+    parser = _ArticleHTMLParser()
+    parser.feed(article_html)
+
+    tags = sorted(set(parser.metadata.get("tags", [])))
+    metadata = {key: value for key, value in parser.metadata.items() if key != "tags" and value}
+    if tags:
+        metadata["tags"] = tags
+
+    content = "\n".join(parser.visible_text_parts).strip()
+
+    return {
+        "title": parser.title or "",
+        "content": content,
+        "metadata": metadata,
+    }
+
+
 @task(name="fetch_feed_task")
 def fetch_feed_task(feed_url: str) -> list[str]:
     logger = _get_task_logger()
@@ -163,6 +257,30 @@ def fetch_feed_task(feed_url: str) -> list[str]:
         raise ValueError(f"feed has no entries: {feed_url}")
 
     return links
+
+
+@task(name="fetch_article_task")
+def fetch_article_task(article_url: str) -> dict[str, Any]:
+    request = Request(
+        article_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; rss-ingest-flow/1.0)",
+        },
+    )
+
+    with urlopen(request, timeout=30) as response:
+        status = getattr(response, "status", 200)
+        if status != 200:
+            raise ValueError(f"unexpected status code: {status}")
+
+        raw_html = response.read()
+        content_type = response.headers.get_content_charset() or "utf-8"
+
+    article_html = raw_html.decode(content_type, errors="replace")
+    extracted = _extract_article_content_and_metadata(article_html)
+    extracted["url"] = article_url
+    return extracted
+
 
 @task(name="load_config_task")
 def load_config_task(config_path: str = "config.yaml") -> dict[str, Any]:
@@ -216,7 +334,28 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     for link in all_links:
         logger.debug("all_links record: %s", link)
 
+    unique_links = list(dict.fromkeys(all_links))
     logger.info("feed links extracted: total=%d", len(all_links))
+    logger.info("feed links extracted: total=%d unique=%d", len(all_links), len(unique_links))
+
+    article_count = 0
+    for link in unique_links:
+        try:
+            article = fetch_article_task(link)
+        except Exception as exc:
+            logger.warning("article fetch skipped: url=%s reason=%s", link, exc)
+            continue
+
+        logger.debug(
+            "article fetched: url=%s title=%s metadata=%s content_length=%d",
+            article["url"],
+            article["title"],
+            article["metadata"],
+            len(article["content"]),
+        )
+        article_count += 1
+
+    logger.info("article fetching completed: total=%d", article_count)
 
 
 if __name__ == "__main__":
