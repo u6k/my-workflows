@@ -230,6 +230,7 @@ def test_extract_article_content_and_metadata() -> None:
 @patch("flows.rss_ingest_flow.urlopen")
 def test_fetch_article_task_returns_content_and_metadata(mock_urlopen: MagicMock) -> None:
     mock_response = MagicMock()
+    mock_response.status = 200
     mock_response.read.return_value = ARTICLE_HTML
     mock_response.headers.get_content_charset.return_value = "utf-8"
     mock_urlopen.return_value.__enter__.return_value = mock_response

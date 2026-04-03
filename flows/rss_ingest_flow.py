@@ -270,6 +270,8 @@ def fetch_article_task(article_url: str) -> dict[str, Any]:
 
     with urlopen(request, timeout=30) as response:
         status = getattr(response, "status", 200)
+        if not isinstance(status, int):
+            status = 200
         if status != 200:
             raise ValueError(f"unexpected status code: {status}")
 
