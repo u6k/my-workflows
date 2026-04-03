@@ -243,6 +243,53 @@ def test_fetch_article_task_returns_content_and_metadata(mock_urlopen: MagicMock
     assert article["metadata"]["tags"] == ["ai", "python", "tech"]
 
 
+@patch("flows.rss_ingest_flow.urlopen")
+def test_fetch_article_task_raises_when_status_is_not_200(mock_urlopen: MagicMock) -> None:
+    mock_response = MagicMock()
+    mock_response.status = 500
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    with pytest.raises(ValueError):
+        rss_ingest_flow.fetch_article_task.fn("https://example.com/posts/error")
+
+
+@patch("flows.rss_ingest_flow.fetch_article_task")
+@patch("flows.rss_ingest_flow.fetch_feed_task")
+@patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow.load_config_task")
+def test_rss_ingest_flow_continues_when_article_fetch_fails(
+    mock_load_config_task: MagicMock,
+    mock_validate_prerequisites_task: MagicMock,
+    mock_fetch_feed_task: MagicMock,
+    mock_fetch_article_task: MagicMock,
+) -> None:
+    mock_load_config_task.return_value = {
+        "rss_urls": ["https://example.com/rss.xml"],
+        "retry": {"max_retries": 3},
+        "storage": {"s3_prefix": "rss"},
+        "prefect_blocks": {
+            "aws_credentials_block": "aws-credentials-prod",
+            "ollama_connection_secret_block": "ollama-connection",
+        },
+    }
+    mock_fetch_feed_task.return_value = ["https://example.com/a", "https://example.com/b"]
+    mock_fetch_article_task.side_effect = [ValueError("unexpected status code: 500"), {"url": "https://example.com/b", "title": "B", "metadata": {}, "content": "ok"}]
+
+    with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
+        mock_logger = MagicMock()
+        mock_get_task_logger.return_value = mock_logger
+        rss_ingest_flow.rss_ingest_flow.fn("config.yaml")
+
+    mock_logger.warning.assert_called_once()
+    warning_args = mock_logger.warning.call_args[0]
+    assert warning_args[0] == "article fetch skipped: url=%s reason=%s"
+    assert warning_args[1] == "https://example.com/a"
+    assert str(warning_args[2]) == "unexpected status code: 500"
+    mock_logger.info.assert_any_call("feed links extracted: total=%d", 2)
+    mock_logger.info.assert_any_call("feed links extracted: total=%d unique=%d", 2, 2)
+    mock_logger.info.assert_any_call("article fetching completed: total=%d", 1)
+
+
 def test_get_task_logger_returns_standard_logger_when_prefect_context_missing() -> None:
     with patch("flows.rss_ingest_flow.get_run_logger", side_effect=rss_ingest_flow.MissingContextError("missing")):
         logger = rss_ingest_flow._get_task_logger()

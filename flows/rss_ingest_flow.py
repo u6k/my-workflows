@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 from html.parser import HTMLParser
 from pathlib import Path
+from socket import timeout as SocketTimeout
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
@@ -269,6 +271,10 @@ def fetch_article_task(article_url: str) -> dict[str, Any]:
     )
 
     with urlopen(request, timeout=30) as response:
+        status = getattr(response, "status", 200)
+        if status != 200:
+            raise ValueError(f"unexpected status code: {status}")
+
         raw_html = response.read()
         content_type = response.headers.get_content_charset() or "utf-8"
 
@@ -331,11 +337,17 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
         logger.debug("all_links record: %s", link)
 
     unique_links = list(dict.fromkeys(all_links))
+    logger.info("feed links extracted: total=%d", len(all_links))
     logger.info("feed links extracted: total=%d unique=%d", len(all_links), len(unique_links))
 
     article_count = 0
     for link in unique_links:
-        article = fetch_article_task(link)
+        try:
+            article = fetch_article_task(link)
+        except (HTTPError, URLError, SocketTimeout, TimeoutError, ValueError) as exc:
+            logger.warning("article fetch skipped: url=%s reason=%s", link, exc)
+            continue
+
         logger.debug(
             "article fetched: url=%s title=%s metadata=%s content_length=%d",
             article["url"],
