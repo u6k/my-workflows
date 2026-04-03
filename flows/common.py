@@ -122,7 +122,11 @@ def invoke_ollama_generate(
     prompt: str,
     timeout_sec: int = 120,
     response_format: str | None = None,
+    logger: logging.Logger | None = None,
 ) -> str:
+    if logger is not None:
+        logger.info("ollama prompt: %s", prompt)
+
     payload: dict[str, Any] = {
         "model": ollama_connection["model"],
         "prompt": prompt,

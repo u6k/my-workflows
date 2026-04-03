@@ -378,7 +378,12 @@ def summarize_briefing_task(article_content: str, ollama_connection: dict[str, s
     logger = _get_task_logger()
     prompt = _build_briefing_prompt(article_content)
     logger.debug("ollama briefing prompt: %s", prompt)
-    summary = invoke_ollama_generate(ollama_connection=ollama_connection, prompt=prompt, timeout_sec=timeout_sec)
+    summary = invoke_ollama_generate(
+        ollama_connection=ollama_connection,
+        prompt=prompt,
+        timeout_sec=timeout_sec,
+        logger=logger,
+    )
     logger.debug("ollama briefing response: %s", summary)
     if not summary:
         raise ValueError("Ollama response does not contain summary text")
@@ -390,7 +395,12 @@ def summarize_one_sentence_task(article_content: str, ollama_connection: dict[st
     logger = _get_task_logger()
     prompt = _build_one_sentence_prompt(article_content)
     logger.debug("ollama one-sentence prompt: %s", prompt)
-    summary = invoke_ollama_generate(ollama_connection=ollama_connection, prompt=prompt, timeout_sec=timeout_sec)
+    summary = invoke_ollama_generate(
+        ollama_connection=ollama_connection,
+        prompt=prompt,
+        timeout_sec=timeout_sec,
+        logger=logger,
+    )
     logger.debug("ollama one-sentence response: %s", summary)
     if not summary:
         raise ValueError("Ollama response does not contain one sentence summary text")

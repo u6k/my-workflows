@@ -122,17 +122,20 @@ def test_design_macro_themes_with_ollama_task_returns_python_object(mock_invoke_
     mock_invoke_ollama_generate.return_value = (
         '{"taxonomy_summary":"summary","themes":[],"unclassifiable_rule":"rule"}'
     )
-    result = daily_news_blog_digest_flow.design_macro_themes_with_ollama_task.fn(
-        articles=[
-            {"title": "A", "one_sentence_summary": "A summary", "content": "ignored"},
-            {"title": "B", "one_sentence_summary": "B summary"},
-        ],
-        ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
-        timeout_sec=60,
-    )
+    mock_logger = MagicMock()
+    with patch("flows.daily_news_blog_digest_flow._get_task_logger", return_value=mock_logger):
+        result = daily_news_blog_digest_flow.design_macro_themes_with_ollama_task.fn(
+            articles=[
+                {"title": "A", "one_sentence_summary": "A summary", "content": "ignored"},
+                {"title": "B", "one_sentence_summary": "B summary"},
+            ],
+            ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+            timeout_sec=60,
+        )
 
     assert result == {
         "taxonomy_summary": "summary",
         "themes": [],
         "unclassifiable_rule": "rule",
     }
+    assert mock_invoke_ollama_generate.call_args.kwargs["logger"] is mock_logger

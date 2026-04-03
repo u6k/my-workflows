@@ -251,6 +251,7 @@ def design_macro_themes_with_ollama_task(
         prompt=prompt,
         timeout_sec=timeout_sec,
         response_format="json",
+        logger=logger,
     )
     logger.info("received macro-theme response from ollama")
     if not raw_response:

@@ -287,6 +287,7 @@ def test_summarize_briefing_task_returns_ollama_response() -> None:
     assert mock_logger.debug.call_count == 2
     assert mock_invoke_ollama_generate.call_args.kwargs["timeout_sec"] == 45
     assert mock_invoke_ollama_generate.call_args.kwargs["ollama_connection"]["model"] == "llama3.1:8b"
+    assert mock_invoke_ollama_generate.call_args.kwargs["logger"] is mock_logger
 
 
 def test_summarize_one_sentence_task_returns_ollama_response() -> None:
@@ -306,6 +307,7 @@ def test_summarize_one_sentence_task_returns_ollama_response() -> None:
     assert mock_logger.debug.call_count == 2
     assert mock_invoke_ollama_generate.call_args.kwargs["timeout_sec"] == 30
     assert mock_invoke_ollama_generate.call_args.kwargs["ollama_connection"]["model"] == "llama3.1:8b"
+    assert mock_invoke_ollama_generate.call_args.kwargs["logger"] is mock_logger
 
 
 @patch("flows.rss_ingest_flow.trafilatura.extract")
