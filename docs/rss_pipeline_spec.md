@@ -81,7 +81,7 @@ storage:
 - `title`
 - `published_timestamp`
 - `fetch_timestamp`
-- `content`
+- `content`（本文抽出テキスト。Trafilatura を優先利用）
 - `raw_html`
 - `briefing_summary`
 - `one_sentence_summary`
@@ -113,6 +113,7 @@ storage:
 - `metadata` は任意拡張オブジェクトとして保持する。
 - RSS/Atom や本文抽出から取得可能な属性を「可能な限り」格納する。
   - 例: `source_feed_url`, `author`, `categories/tags`, `language`, `image_url`, `entry_id`, `updated_timestamp`, `site_name` など。
+- 本文抽出は Trafilatura を優先し、抽出不可時はフォールバック手法で本文を補完する。
 
 ### 3.5 S3 保存パス
 記事 URL の MD5 を `url_md5` としたとき、以下に保存する。

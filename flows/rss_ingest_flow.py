@@ -16,6 +16,7 @@ from prefect import flow, get_run_logger, task
 from prefect.blocks.system import Secret
 from prefect.exceptions import MissingContextError
 from prefect_aws.credentials import AwsCredentials
+import trafilatura
 
 
 REQUIRED_PREFECT_BLOCK_KEYS = (
@@ -310,7 +311,20 @@ def _extract_article_content_and_metadata(article_html: str) -> dict[str, Any]:
     if tags:
         metadata["tags"] = tags
 
-    content = "\n".join(parser.visible_text_parts).strip()
+    extracted_content = trafilatura.extract(
+        article_html,
+        output_format="txt",
+        include_comments=False,
+        include_tables=False,
+        deduplicate=True,
+    )
+    if isinstance(extracted_content, str):
+        content = extracted_content.strip()
+    else:
+        content = ""
+
+    if not content:
+        content = "\n".join(parser.visible_text_parts).strip()
 
     return {
         "title": parser.title or "",

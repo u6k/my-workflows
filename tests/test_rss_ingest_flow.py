@@ -213,12 +213,14 @@ def test_fetch_feed_task_raises_when_no_entries(
     )
 
 
-def test_extract_article_content_and_metadata() -> None:
+@patch("flows.rss_ingest_flow.trafilatura.extract")
+def test_extract_article_content_and_metadata(mock_trafilatura_extract: MagicMock) -> None:
+    mock_trafilatura_extract.return_value = "Main content from trafilatura"
+
     extracted = rss_ingest_flow._extract_article_content_and_metadata(ARTICLE_HTML.decode("utf-8"))
 
     assert extracted["title"] == "Example title"
-    assert "Heading" in extracted["content"]
-    assert "ignored()" not in extracted["content"]
+    assert extracted["content"] == "Main content from trafilatura"
     assert extracted["metadata"] == {
         "author": "Jane Doe",
         "image_url": "https://example.com/image.jpg",
@@ -229,8 +231,13 @@ def test_extract_article_content_and_metadata() -> None:
     }
 
 
+@patch("flows.rss_ingest_flow.trafilatura.extract")
 @patch("flows.rss_ingest_flow.urlopen")
-def test_fetch_article_task_returns_content_and_metadata(mock_urlopen: MagicMock) -> None:
+def test_fetch_article_task_returns_content_and_metadata(
+    mock_urlopen: MagicMock,
+    mock_trafilatura_extract: MagicMock,
+) -> None:
+    mock_trafilatura_extract.return_value = "Main content from trafilatura"
     mock_response = MagicMock()
     mock_response.status = 200
     mock_response.read.return_value = ARTICLE_HTML
@@ -242,10 +249,22 @@ def test_fetch_article_task_returns_content_and_metadata(mock_urlopen: MagicMock
     assert article["id"] == "de0617c481337158695d4e48d5c275d2"
     assert article["url"] == "https://example.com/posts/1"
     assert article["title"] == "Example title"
-    assert "Paragraph A." in article["content"]
+    assert article["content"] == "Main content from trafilatura"
     assert "<html>" in article["raw_html"]
     assert article["metadata"]["author"] == "Jane Doe"
     assert article["metadata"]["tags"] == ["ai", "python", "tech"]
+
+
+@patch("flows.rss_ingest_flow.trafilatura.extract")
+def test_extract_article_content_and_metadata_falls_back_when_trafilatura_returns_none(
+    mock_trafilatura_extract: MagicMock,
+) -> None:
+    mock_trafilatura_extract.return_value = None
+
+    extracted = rss_ingest_flow._extract_article_content_and_metadata(ARTICLE_HTML.decode("utf-8"))
+
+    assert "Heading" in extracted["content"]
+    assert "ignored()" not in extracted["content"]
 
 
 @patch("flows.rss_ingest_flow.AwsCredentials")
