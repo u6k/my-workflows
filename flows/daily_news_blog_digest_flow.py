@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from prefect import flow, get_run_logger, task
 from prefect.exceptions import MissingContextError
 from prefect_aws.credentials import AwsCredentials
-from flows.common import create_s3_client, load_yaml_config
+
+if __package__ in {None, ""}:
+    sys.path.append(str(Path(__file__).resolve().parent))
+    from common import create_s3_client, load_yaml_config
+else:
+    from .common import create_s3_client, load_yaml_config
 
 
 def _get_task_logger() -> logging.Logger:
