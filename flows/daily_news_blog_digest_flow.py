@@ -58,6 +58,22 @@ def _parse_target_date(target_date: str) -> date:
         raise ValueError("target_date must be in YYYY-MM-DD format") from exc
 
 
+def _resolve_target_date(target_date: str | None, config: dict[str, Any]) -> str:
+    if target_date is not None:
+        resolved_target_date = target_date
+    else:
+        config_target_date = config.get("target_date")
+        if config_target_date is None:
+            resolved_target_date = datetime.now(timezone.utc).date().isoformat()
+        else:
+            resolved_target_date = config_target_date
+
+    if not isinstance(resolved_target_date, str) or not resolved_target_date:
+        raise ValueError("target_date must be a non-empty string")
+
+    return _parse_target_date(resolved_target_date).isoformat()
+
+
 def _create_s3_client(aws_credentials: AwsCredentials) -> Any:
     return create_s3_client(aws_credentials)
 
@@ -143,17 +159,19 @@ def fetch_daily_articles_from_s3_task(
 
 
 @flow(name="daily-news-blog-digest-flow")
-def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yaml") -> list[dict[str, Any]]:
+def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str = "config.yaml") -> list[dict[str, Any]]:
     logger = _get_task_logger()
-    logger.info("daily-news-blog-digest-flow start: target_date=%s", target_date)
 
     config = load_daily_digest_config_task(config_path)
+    resolved_target_date = _resolve_target_date(target_date, config)
+    logger.info("daily-news-blog-digest-flow start: target_date=%s", resolved_target_date)
+
     return fetch_daily_articles_from_s3_task(
-        target_date=target_date,
+        target_date=resolved_target_date,
         storage=config["storage"],
         aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
     )
 
 
 if __name__ == "__main__":
-    daily_news_blog_digest_flow(target_date="2026-04-02")
+    daily_news_blog_digest_flow()

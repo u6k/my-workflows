@@ -81,3 +81,23 @@ def test_fetch_daily_articles_from_s3_task_raises_when_target_date_invalid() -> 
             storage={"s3_bucket": "news-bucket", "s3_prefix": "rss"},
             aws_credentials_block_name="aws-credentials",
         )
+
+
+def test_resolve_target_date_uses_config_value_when_flow_param_is_none() -> None:
+    resolved = daily_news_blog_digest_flow._resolve_target_date(
+        target_date=None,
+        config={"target_date": "2026-04-02"},
+    )
+
+    assert resolved == "2026-04-02"
+
+
+def test_resolve_target_date_defaults_to_today_when_config_missing() -> None:
+    expected = datetime.now(timezone.utc).date().isoformat()
+
+    resolved = daily_news_blog_digest_flow._resolve_target_date(
+        target_date=None,
+        config={},
+    )
+
+    assert resolved == expected
