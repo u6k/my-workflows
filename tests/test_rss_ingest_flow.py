@@ -81,15 +81,15 @@ prefect_blocks:
 
 
 @patch("flows.rss_ingest_flow.get_run_logger")
-@patch("flows.rss_ingest_flow.Secret")
+@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
 @patch("flows.rss_ingest_flow.AwsCredentials")
 def test_validate_prerequisites_task_loads_blocks_and_json_secret(
     mock_aws_credentials: MagicMock,
-    mock_secret: MagicMock,
+    mock_load_ollama_connection_secret: MagicMock,
     mock_get_run_logger: MagicMock,
 ) -> None:
     mock_get_run_logger.return_value = MagicMock()
-    mock_secret.load.return_value.get.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
 
     parsed_config = {
         "rss_urls": ["https://example.com/rss.xml", "https://example.com/rss.xml"],
@@ -104,19 +104,19 @@ def test_validate_prerequisites_task_loads_blocks_and_json_secret(
     rss_ingest_flow.validate_prerequisites_task.fn(parsed_config)
 
     mock_aws_credentials.load.assert_called_once_with("aws-credentials-prod")
-    mock_secret.load.assert_called_once_with("ollama-connection")
+    mock_load_ollama_connection_secret.assert_called_once()
 
 
 @patch("flows.rss_ingest_flow.get_run_logger")
-@patch("flows.rss_ingest_flow.Secret")
+@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
 @patch("flows.rss_ingest_flow.AwsCredentials")
 def test_validate_prerequisites_task_raises_when_secret_value_is_not_dict(
     mock_aws_credentials: MagicMock,
-    mock_secret: MagicMock,
+    mock_load_ollama_connection_secret: MagicMock,
     mock_get_run_logger: MagicMock,
 ) -> None:
     mock_get_run_logger.return_value = MagicMock()
-    mock_secret.load.return_value.get.return_value = "not-dict"
+    mock_load_ollama_connection_secret.side_effect = ValueError("Ollama Secret block value must be a dict")
 
     parsed_config = {
         "rss_urls": ["https://example.com/rss.xml"],
@@ -270,14 +270,13 @@ def test_build_one_sentence_prompt_includes_article_content() -> None:
     assert "一文" in prompt
 
 
-@patch("flows.rss_ingest_flow.urlopen")
-def test_summarize_briefing_task_returns_ollama_response(mock_urlopen: MagicMock) -> None:
-    mock_response = MagicMock()
-    mock_response.read.return_value = OLLAMA_GENERATE_RESPONSE
-    mock_urlopen.return_value.__enter__.return_value = mock_response
+def test_summarize_briefing_task_returns_ollama_response() -> None:
     mock_logger = MagicMock()
 
-    with patch("flows.rss_ingest_flow._get_task_logger", return_value=mock_logger):
+    with (
+        patch("flows.rss_ingest_flow._get_task_logger", return_value=mock_logger),
+        patch("flows.rss_ingest_flow.invoke_ollama_generate", return_value="summary text") as mock_invoke_ollama_generate,
+    ):
         summary = rss_ingest_flow.summarize_briefing_task.fn(
             article_content="本文",
             ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
@@ -286,17 +285,17 @@ def test_summarize_briefing_task_returns_ollama_response(mock_urlopen: MagicMock
 
     assert summary == "summary text"
     assert mock_logger.debug.call_count == 2
-    assert mock_urlopen.call_args.kwargs["timeout"] == 45
+    assert mock_invoke_ollama_generate.call_args.kwargs["timeout_sec"] == 45
+    assert mock_invoke_ollama_generate.call_args.kwargs["ollama_connection"]["model"] == "llama3.1:8b"
 
 
-@patch("flows.rss_ingest_flow.urlopen")
-def test_summarize_one_sentence_task_returns_ollama_response(mock_urlopen: MagicMock) -> None:
-    mock_response = MagicMock()
-    mock_response.read.return_value = OLLAMA_GENERATE_RESPONSE
-    mock_urlopen.return_value.__enter__.return_value = mock_response
+def test_summarize_one_sentence_task_returns_ollama_response() -> None:
     mock_logger = MagicMock()
 
-    with patch("flows.rss_ingest_flow._get_task_logger", return_value=mock_logger):
+    with (
+        patch("flows.rss_ingest_flow._get_task_logger", return_value=mock_logger),
+        patch("flows.rss_ingest_flow.invoke_ollama_generate", return_value="summary text") as mock_invoke_ollama_generate,
+    ):
         summary = rss_ingest_flow.summarize_one_sentence_task.fn(
             article_content="本文",
             ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
@@ -305,7 +304,8 @@ def test_summarize_one_sentence_task_returns_ollama_response(mock_urlopen: Magic
 
     assert summary == "summary text"
     assert mock_logger.debug.call_count == 2
-    assert mock_urlopen.call_args.kwargs["timeout"] == 30
+    assert mock_invoke_ollama_generate.call_args.kwargs["timeout_sec"] == 30
+    assert mock_invoke_ollama_generate.call_args.kwargs["ollama_connection"]["model"] == "llama3.1:8b"
 
 
 @patch("flows.rss_ingest_flow.trafilatura.extract")
@@ -467,11 +467,11 @@ def test_fetch_article_task_raises_when_status_is_not_200(mock_urlopen: MagicMoc
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
-@patch("flows.rss_ingest_flow.Secret")
+@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_continues_when_article_fetch_fails(
     mock_load_config_task: MagicMock,
-    mock_secret: MagicMock,
+    mock_load_ollama_connection_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
@@ -489,7 +489,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
             "ollama_connection_secret_block": "ollama-connection",
         },
     }
-    mock_secret.load.return_value.get.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_fetch_feed_task.return_value = ["https://example.com/a", "https://example.com/b"]
     mock_check_s3_object_exists_task.side_effect = [
         {"exists": False, "id": "aaaa", "object_key": "rss/aa/aaaa.json"},
@@ -525,11 +525,11 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
-@patch("flows.rss_ingest_flow.Secret")
+@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exception(
     mock_load_config_task: MagicMock,
-    mock_secret: MagicMock,
+    mock_load_ollama_connection_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
@@ -547,7 +547,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
             "ollama_connection_secret_block": "ollama-connection",
         },
     }
-    mock_secret.load.return_value.get.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_fetch_feed_task.return_value = ["https://example.com/a", "https://example.com/b"]
     mock_check_s3_object_exists_task.side_effect = [
         {"exists": False, "id": "aaaa", "object_key": "rss/aa/aaaa.json"},
@@ -581,11 +581,11 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
-@patch("flows.rss_ingest_flow.Secret")
+@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
     mock_load_config_task: MagicMock,
-    mock_secret: MagicMock,
+    mock_load_ollama_connection_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
@@ -603,7 +603,7 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
             "ollama_connection_secret_block": "ollama-connection",
         },
     }
-    mock_secret.load.return_value.get.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_fetch_feed_task.return_value = ["https://example.com/a"]
     mock_check_s3_object_exists_task.return_value = {
         "exists": True,
@@ -630,11 +630,11 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
-@patch("flows.rss_ingest_flow.Secret")
+@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_skips_article_when_summarization_fails(
     mock_load_config_task: MagicMock,
-    mock_secret: MagicMock,
+    mock_load_ollama_connection_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
@@ -652,7 +652,7 @@ def test_rss_ingest_flow_skips_article_when_summarization_fails(
             "ollama_connection_secret_block": "ollama-connection",
         },
     }
-    mock_secret.load.return_value.get.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_fetch_feed_task.return_value = ["https://example.com/a"]
     mock_check_s3_object_exists_task.return_value = {"exists": False, "id": "aaaa", "object_key": "rss/aa/aaaa.json"}
     mock_fetch_article_task.return_value = {"id": "aaaa", "url": "https://example.com/a", "title": "A", "metadata": {}, "content": "ok"}
