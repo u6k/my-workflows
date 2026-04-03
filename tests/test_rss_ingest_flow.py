@@ -115,7 +115,7 @@ RSS_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
     <item><title>A</title><link>https://example.com/a</link></item>
     <item><title>B</title><link>https://example.com/b</link></item>
     <item><title>B duplicate</title><link>https://example.com/b</link></item>
-    <item><title>C redirect</title><link>https://www.google.com/url?url=https%3A%2F%2Fexample.com%2Fc&sa=D</link></item>
+    <item><title>C redirect</title><link>https://www.google.com/url?url=https%3A%2F%2Fexample.com%2Fc&amp;sa=D</link></item>
   </channel>
 </rss>
 """
