@@ -132,10 +132,13 @@ def _extract_links_from_feed_xml(feed_xml: bytes) -> list[str]:
 
 @task(name="fetch_feed_task")
 def fetch_feed_task(feed_url: str) -> list[str]:
+    logger = get_run_logger()
+
     with urlopen(feed_url, timeout=30) as response:
         feed_xml = response.read()
 
     links = _extract_links_from_feed_xml(feed_xml)
+    logger.debug("extracted links: feed_url=%s links=%s", feed_url, links)
     if len(links) == 0:
         raise ValueError(f"feed has no entries: {feed_url}")
 

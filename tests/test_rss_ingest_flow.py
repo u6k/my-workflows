@@ -141,16 +141,27 @@ def test_extract_links_from_feed_xml_supports_atom() -> None:
     assert links == ["https://example.com/atom-a", "https://example.com/atom-b"]
 
 
+@patch("flows.rss_ingest_flow.get_run_logger")
 @patch("flows.rss_ingest_flow.urlopen")
-def test_fetch_feed_task_returns_links_from_feed(mock_urlopen: MagicMock) -> None:
+def test_fetch_feed_task_returns_links_from_feed(
+    mock_urlopen: MagicMock,
+    mock_get_run_logger: MagicMock,
+) -> None:
     mock_response = MagicMock()
     mock_response.read.return_value = RSS_XML
     mock_urlopen.return_value.__enter__.return_value = mock_response
+    mock_logger = MagicMock()
+    mock_get_run_logger.return_value = mock_logger
 
     links = rss_ingest_flow.fetch_feed_task.fn("https://example.com/rss.xml")
 
     assert links == ["https://example.com/a", "https://example.com/b"]
     mock_urlopen.assert_called_once_with("https://example.com/rss.xml", timeout=30)
+    mock_logger.debug.assert_called_once_with(
+        "extracted links: feed_url=%s links=%s",
+        "https://example.com/rss.xml",
+        ["https://example.com/a", "https://example.com/b"],
+    )
 
 
 @patch("flows.rss_ingest_flow.urlopen")
