@@ -27,6 +27,12 @@ REQUIRED_OLLAMA_CONNECTION_KEYS = (
     "base_url",
     "model",
 )
+BRIEFING_PROMPT_TEMPLATE = """以下のニュース記事から主要なテーマとアイデアを統合した包括的なブリーフィングドキュメントを作成してください。まずは、最も重要なポイントを簡潔にまとめたエグゼクティブサマリーから始めましょう。本文では、情報源に含まれる主要なテーマ、証拠、そして結論を​​詳細かつ徹底的に検証する必要があります。分析は、明瞭性を確保するために、見出しと箇条書きを用いて論理的に構成する必要があります。トーンは客観的かつ鋭いものでなければなりません。
+
+# ニュース記事
+```txt
+{article_content}
+```"""
 
 
 def _load_yaml_config(config_path: str) -> dict[str, Any]:
@@ -183,6 +189,10 @@ def _create_s3_client(aws_credentials: AwsCredentials) -> Any:
         client_kwargs["config"] = config
 
     return aws_credentials.get_boto3_session().client("s3", **client_kwargs)
+
+
+def _build_briefing_prompt(article_content: str) -> str:
+    return BRIEFING_PROMPT_TEMPLATE.format(article_content=article_content)
 
 
 def _extract_links_from_feed_xml(feed_xml: bytes) -> list[str]:
@@ -408,6 +418,28 @@ def check_s3_object_exists_task(article_url: str, storage: dict[str, Any], aws_c
         raise
 
 
+@task(name="summarize_briefing_task")
+def summarize_briefing_task(article_content: str, ollama_connection: dict[str, str]) -> str:
+    payload = {
+        "model": ollama_connection["model"],
+        "prompt": _build_briefing_prompt(article_content),
+        "stream": False,
+    }
+    request = Request(
+        f"{ollama_connection['base_url'].rstrip('/')}/api/generate",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=120) as response:
+        body = response.read().decode("utf-8")
+    response_json = json.loads(body)
+    summary = response_json.get("response", "").strip()
+    if not summary:
+        raise ValueError("Ollama response does not contain summary text")
+    return summary
+
+
 @task(name="load_config_task")
 def load_config_task(config_path: str = "config.yaml") -> dict[str, Any]:
     config = _load_yaml_config(config_path)
@@ -451,6 +483,7 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
 
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
+    ollama_connection = Secret.load(config["prefect_blocks"]["ollama_connection_secret_block"]).get()
 
     all_links: list[str] = []
     for feed_url in list(dict.fromkeys(config["rss_urls"])):
@@ -488,6 +521,15 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
             article = fetch_article_task(link)
         except Exception as exc:
             logger.warning("article fetch skipped: url=%s reason=%s", link, exc)
+            continue
+
+        try:
+            article["briefing_summary"] = summarize_briefing_task(
+                article_content=article["content"],
+                ollama_connection=ollama_connection,
+            )
+        except Exception as exc:
+            logger.warning("article summarize skipped: url=%s reason=%s", link, exc)
             continue
 
         object_key = store_to_s3_task(

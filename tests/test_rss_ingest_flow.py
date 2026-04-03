@@ -156,6 +156,9 @@ ARTICLE_HTML = b"""<!doctype html>
 """
 
 
+OLLAMA_GENERATE_RESPONSE = b'{"response":"summary text"}'
+
+
 def test_extract_links_from_feed_xml_supports_rss_and_deduplicates() -> None:
     links = rss_ingest_flow._extract_links_from_feed_xml(RSS_XML)
 
@@ -229,6 +232,26 @@ def test_extract_article_content_and_metadata(mock_trafilatura_extract: MagicMoc
         "site_name": "Example Site",
         "tags": ["ai", "python", "tech"],
     }
+
+
+def test_build_briefing_prompt_includes_article_content() -> None:
+    prompt = rss_ingest_flow._build_briefing_prompt("本文です")
+    assert "本文です" in prompt
+    assert "# ニュース記事" in prompt
+
+
+@patch("flows.rss_ingest_flow.urlopen")
+def test_summarize_briefing_task_returns_ollama_response(mock_urlopen: MagicMock) -> None:
+    mock_response = MagicMock()
+    mock_response.read.return_value = OLLAMA_GENERATE_RESPONSE
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    summary = rss_ingest_flow.summarize_briefing_task.fn(
+        article_content="本文",
+        ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+    )
+
+    assert summary == "summary text"
 
 
 @patch("flows.rss_ingest_flow.trafilatura.extract")
@@ -379,15 +402,19 @@ def test_fetch_article_task_raises_when_status_is_not_200(mock_urlopen: MagicMoc
 
 @patch("flows.rss_ingest_flow.check_s3_object_exists_task")
 @patch("flows.rss_ingest_flow.store_to_s3_task")
+@patch("flows.rss_ingest_flow.summarize_briefing_task")
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow.Secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_continues_when_article_fetch_fails(
     mock_load_config_task: MagicMock,
+    mock_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
+    mock_summarize_briefing_task: MagicMock,
     mock_store_to_s3_task: MagicMock,
     mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
@@ -400,6 +427,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
             "ollama_connection_secret_block": "ollama-connection",
         },
     }
+    mock_secret.load.return_value.get.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_fetch_feed_task.return_value = ["https://example.com/a", "https://example.com/b"]
     mock_check_s3_object_exists_task.side_effect = [
         {"exists": False, "id": "aaaa", "object_key": "rss/aa/aaaa.json"},
@@ -409,6 +437,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
         ValueError("unexpected status code: 500"),
         {"id": "bbbb", "url": "https://example.com/b", "title": "B", "metadata": {}, "content": "ok"},
     ]
+    mock_summarize_briefing_task.return_value = "summary"
     mock_store_to_s3_task.return_value = "rss/bb/bbbb.json"
 
     with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
@@ -428,15 +457,19 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
 
 @patch("flows.rss_ingest_flow.check_s3_object_exists_task")
 @patch("flows.rss_ingest_flow.store_to_s3_task")
+@patch("flows.rss_ingest_flow.summarize_briefing_task")
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow.Secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exception(
     mock_load_config_task: MagicMock,
+    mock_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
+    mock_summarize_briefing_task: MagicMock,
     mock_store_to_s3_task: MagicMock,
     mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
@@ -449,6 +482,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
             "ollama_connection_secret_block": "ollama-connection",
         },
     }
+    mock_secret.load.return_value.get.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_fetch_feed_task.return_value = ["https://example.com/a", "https://example.com/b"]
     mock_check_s3_object_exists_task.side_effect = [
         {"exists": False, "id": "aaaa", "object_key": "rss/aa/aaaa.json"},
@@ -458,6 +492,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
         RuntimeError("boom"),
         {"id": "bbbb", "url": "https://example.com/b", "title": "B", "metadata": {}, "content": "ok"},
     ]
+    mock_summarize_briefing_task.return_value = "summary"
     mock_store_to_s3_task.return_value = "rss/bb/bbbb.json"
 
     with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
@@ -475,15 +510,19 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
 
 @patch("flows.rss_ingest_flow.check_s3_object_exists_task")
 @patch("flows.rss_ingest_flow.store_to_s3_task")
+@patch("flows.rss_ingest_flow.summarize_briefing_task")
 @patch("flows.rss_ingest_flow.fetch_article_task")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow.Secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
     mock_load_config_task: MagicMock,
+    mock_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_article_task: MagicMock,
+    mock_summarize_briefing_task: MagicMock,
     mock_store_to_s3_task: MagicMock,
     mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
@@ -496,6 +535,7 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
             "ollama_connection_secret_block": "ollama-connection",
         },
     }
+    mock_secret.load.return_value.get.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_fetch_feed_task.return_value = ["https://example.com/a"]
     mock_check_s3_object_exists_task.return_value = {
         "exists": True,
@@ -509,8 +549,55 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
         rss_ingest_flow.rss_ingest_flow.fn("config.yaml")
 
     mock_fetch_article_task.assert_not_called()
+    mock_summarize_briefing_task.assert_not_called()
     mock_store_to_s3_task.assert_not_called()
     mock_logger.info.assert_any_call("article skipped by existing s3 object: total=%d", 1)
+
+
+@patch("flows.rss_ingest_flow.check_s3_object_exists_task")
+@patch("flows.rss_ingest_flow.store_to_s3_task")
+@patch("flows.rss_ingest_flow.summarize_briefing_task")
+@patch("flows.rss_ingest_flow.fetch_article_task")
+@patch("flows.rss_ingest_flow.fetch_feed_task")
+@patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow.Secret")
+@patch("flows.rss_ingest_flow.load_config_task")
+def test_rss_ingest_flow_skips_article_when_summarization_fails(
+    mock_load_config_task: MagicMock,
+    mock_secret: MagicMock,
+    mock_validate_prerequisites_task: MagicMock,
+    mock_fetch_feed_task: MagicMock,
+    mock_fetch_article_task: MagicMock,
+    mock_summarize_briefing_task: MagicMock,
+    mock_store_to_s3_task: MagicMock,
+    mock_check_s3_object_exists_task: MagicMock,
+) -> None:
+    mock_load_config_task.return_value = {
+        "rss_urls": ["https://example.com/rss.xml"],
+        "retry": {"max_retries": 3},
+        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        "prefect_blocks": {
+            "aws_credentials_block": "aws-credentials-prod",
+            "ollama_connection_secret_block": "ollama-connection",
+        },
+    }
+    mock_secret.load.return_value.get.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_fetch_feed_task.return_value = ["https://example.com/a"]
+    mock_check_s3_object_exists_task.return_value = {"exists": False, "id": "aaaa", "object_key": "rss/aa/aaaa.json"}
+    mock_fetch_article_task.return_value = {"id": "aaaa", "url": "https://example.com/a", "title": "A", "metadata": {}, "content": "ok"}
+    mock_summarize_briefing_task.side_effect = RuntimeError("ollama error")
+
+    with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
+        mock_logger = MagicMock()
+        mock_get_task_logger.return_value = mock_logger
+        rss_ingest_flow.rss_ingest_flow.fn("config.yaml")
+
+    mock_store_to_s3_task.assert_not_called()
+    mock_logger.warning.assert_called_once()
+    warning_args = mock_logger.warning.call_args[0]
+    assert warning_args[0] == "article summarize skipped: url=%s reason=%s"
+    assert warning_args[1] == "https://example.com/a"
+    assert str(warning_args[2]) == "ollama error"
 
 
 def test_get_task_logger_returns_standard_logger_when_prefect_context_missing() -> None:
