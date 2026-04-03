@@ -321,7 +321,9 @@ def test_store_to_s3_task_stores_article_json_with_hashed_key(mock_aws_credentia
     mock_s3_client = MagicMock()
     mock_session = MagicMock()
     mock_session.client.return_value = mock_s3_client
-    mock_aws_credentials.load.return_value.get_boto3_session.return_value = mock_session
+    mock_credentials = mock_aws_credentials.load.return_value
+    mock_credentials.get_boto3_session.return_value = mock_session
+    mock_credentials.aws_client_parameters = None
 
     key = rss_ingest_flow.store_to_s3_task.fn(
         article={"id": "ab1234567890abcdef", "url": "https://example.com/a", "title": "A"},
@@ -377,7 +379,9 @@ def test_check_s3_object_exists_task_returns_true_when_object_exists(mock_aws_cr
     mock_s3_client = MagicMock()
     mock_session = MagicMock()
     mock_session.client.return_value = mock_s3_client
-    mock_aws_credentials.load.return_value.get_boto3_session.return_value = mock_session
+    mock_credentials = mock_aws_credentials.load.return_value
+    mock_credentials.get_boto3_session.return_value = mock_session
+    mock_credentials.aws_client_parameters = None
 
     result = rss_ingest_flow.check_s3_object_exists_task.fn(
         article_url="https://example.com/posts/1",
@@ -399,7 +403,9 @@ def test_check_s3_object_exists_task_returns_false_when_object_not_found(mock_aw
     mock_s3_client = MagicMock()
     mock_session = MagicMock()
     mock_session.client.return_value = mock_s3_client
-    mock_aws_credentials.load.return_value.get_boto3_session.return_value = mock_session
+    mock_credentials = mock_aws_credentials.load.return_value
+    mock_credentials.get_boto3_session.return_value = mock_session
+    mock_credentials.aws_client_parameters = None
 
     not_found_error = Exception("not found")
     not_found_error.response = {"Error": {"Code": "404"}}
