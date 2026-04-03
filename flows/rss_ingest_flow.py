@@ -107,6 +107,15 @@ def _validate_config(config: dict[str, Any]) -> None:
     if invalid_block_names:
         raise ValueError(f"config.prefect_blocks values must be non-empty strings: {', '.join(invalid_block_names)}")
 
+    ollama = config.get("ollama")
+    if ollama is not None:
+        if not isinstance(ollama, dict):
+            raise ValueError("config.ollama must be an object")
+
+        request_timeout_sec = ollama.get("request_timeout_sec")
+        if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
+            raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
+
 
 def _get_task_logger() -> logging.Logger:
     try:
@@ -430,7 +439,7 @@ def check_s3_object_exists_task(article_url: str, storage: dict[str, Any], aws_c
 
 
 @task(name="summarize_briefing_task")
-def summarize_briefing_task(article_content: str, ollama_connection: dict[str, str]) -> str:
+def summarize_briefing_task(article_content: str, ollama_connection: dict[str, str], timeout_sec: int = 120) -> str:
     logger = _get_task_logger()
     prompt = _build_briefing_prompt(article_content)
     logger.debug("ollama briefing prompt: %s", prompt)
@@ -446,7 +455,7 @@ def summarize_briefing_task(article_content: str, ollama_connection: dict[str, s
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urlopen(request, timeout=120) as response:
+    with urlopen(request, timeout=timeout_sec) as response:
         body = response.read().decode("utf-8")
     response_json = json.loads(body)
     summary = response_json.get("response", "").strip()
@@ -457,7 +466,7 @@ def summarize_briefing_task(article_content: str, ollama_connection: dict[str, s
 
 
 @task(name="summarize_one_sentence_task")
-def summarize_one_sentence_task(article_content: str, ollama_connection: dict[str, str]) -> str:
+def summarize_one_sentence_task(article_content: str, ollama_connection: dict[str, str], timeout_sec: int = 120) -> str:
     logger = _get_task_logger()
     prompt = _build_one_sentence_prompt(article_content)
     logger.debug("ollama one-sentence prompt: %s", prompt)
@@ -473,7 +482,7 @@ def summarize_one_sentence_task(article_content: str, ollama_connection: dict[st
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urlopen(request, timeout=120) as response:
+    with urlopen(request, timeout=timeout_sec) as response:
         body = response.read().decode("utf-8")
     response_json = json.loads(body)
     summary = response_json.get("response", "").strip()
@@ -527,6 +536,7 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
     ollama_connection = Secret.load(config["prefect_blocks"]["ollama_connection_secret_block"]).get()
+    ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
 
     all_links: list[str] = []
     for feed_url in list(dict.fromkeys(config["rss_urls"])):
@@ -570,10 +580,12 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
             article["briefing_summary"] = summarize_briefing_task(
                 article_content=article["content"],
                 ollama_connection=ollama_connection,
+                timeout_sec=ollama_timeout_sec,
             )
             article["one_sentence_summary"] = summarize_one_sentence_task(
                 article_content=article["content"],
                 ollama_connection=ollama_connection,
+                timeout_sec=ollama_timeout_sec,
             )
         except Exception as exc:
             logger.warning("article summarize skipped: url=%s reason=%s", link, exc)

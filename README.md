@@ -56,6 +56,7 @@ cp config.example.yaml config.yaml
 - 既存オブジェクト判定: `s3://{s3_bucket}/{s3_prefix}/{urlのmd5先頭2文字}/{urlのmd5}.json` が存在する記事は再取得せずスキップ
 - 保存JSON: Trafilatura による本文抽出結果 `content` と、生HTML `raw_html` の両方を保持
 - Ollama 要約: `briefing_summary` と `one_sentence_summary` を本文から生成して保存
+- `ollama.request_timeout_sec`: Ollama API呼び出しタイムアウト秒（省略時120秒）
 - `prefect_blocks.aws_credentials_block`: AWS Credentials Block 名
 - `prefect_blocks.ollama_connection_secret_block`: Ollama 接続情報(JSON)を格納した Secret Block 名
 

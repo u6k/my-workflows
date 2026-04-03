@@ -56,6 +56,30 @@ def test_load_config_task_raises_when_rss_urls_is_empty(tmp_path) -> None:
         rss_ingest_flow.load_config_task.fn(str(config_path))
 
 
+def test_load_config_task_raises_when_ollama_timeout_is_invalid(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+rss_urls:
+  - https://example.com/rss.xml
+retry:
+  max_retries: 3
+storage:
+  s3_bucket: news-bucket
+  s3_prefix: rss
+ollama:
+  request_timeout_sec: 0
+prefect_blocks:
+  aws_credentials_block: aws-credentials-prod
+  ollama_connection_secret_block: ollama-connection
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        rss_ingest_flow.load_config_task.fn(str(config_path))
+
+
 @patch("flows.rss_ingest_flow.get_run_logger")
 @patch("flows.rss_ingest_flow.Secret")
 @patch("flows.rss_ingest_flow.AwsCredentials")
@@ -257,10 +281,12 @@ def test_summarize_briefing_task_returns_ollama_response(mock_urlopen: MagicMock
         summary = rss_ingest_flow.summarize_briefing_task.fn(
             article_content="本文",
             ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+            timeout_sec=45,
         )
 
     assert summary == "summary text"
     assert mock_logger.debug.call_count == 2
+    assert mock_urlopen.call_args.kwargs["timeout"] == 45
 
 
 @patch("flows.rss_ingest_flow.urlopen")
@@ -274,10 +300,12 @@ def test_summarize_one_sentence_task_returns_ollama_response(mock_urlopen: Magic
         summary = rss_ingest_flow.summarize_one_sentence_task.fn(
             article_content="本文",
             ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+            timeout_sec=30,
         )
 
     assert summary == "summary text"
     assert mock_logger.debug.call_count == 2
+    assert mock_urlopen.call_args.kwargs["timeout"] == 30
 
 
 @patch("flows.rss_ingest_flow.trafilatura.extract")

@@ -26,6 +26,9 @@ retry:
 storage:
   s3_bucket: news-bucket
   s3_prefix: rss
+
+ollama:
+  request_timeout_sec: 120
 ```
 
 ### 1.3 キー定義
@@ -40,6 +43,8 @@ storage:
 - `storage`（必須）
   - `s3_bucket`（必須, 文字列）: S3互換ストレージのバケット名。
   - `s3_prefix`（必須, 文字列）: S3保存時のプレフィックス。
+- `ollama`（任意）
+  - `request_timeout_sec`（任意, 正の整数）: Ollama API呼び出しタイムアウト秒。未指定時は120秒。
 
 ### 1.4 バリデーション要件
 - `rss_urls` が空配列または未定義の場合、フローは開始時点で `FAILED` とする。
