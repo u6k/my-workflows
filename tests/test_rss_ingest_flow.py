@@ -269,6 +269,40 @@ def test_store_to_s3_task_stores_article_json_with_hashed_key(mock_aws_credentia
     assert put_object_kwargs["Key"] == "rss/ab/ab1234567890abcdef.json"
 
 
+def test_create_s3_client_parses_json_string_botocore_config() -> None:
+    mock_s3_client = MagicMock()
+    mock_session = MagicMock()
+    mock_session.client.return_value = mock_s3_client
+
+    mock_aws_credentials = MagicMock()
+    mock_aws_credentials.get_boto3_session.return_value = mock_session
+    mock_aws_credentials.aws_client_parameters = {
+        "endpoint_url": "https://s3.example.com",
+        "config": '{"s3":{"addressing_style":"path"}}',
+    }
+
+    client = rss_ingest_flow._create_s3_client(mock_aws_credentials)
+
+    assert client is mock_s3_client
+    mock_session.client.assert_called_once()
+    call_kwargs = mock_session.client.call_args.kwargs
+    assert call_kwargs["endpoint_url"] == "https://s3.example.com"
+    assert call_kwargs["config"].s3 == {"addressing_style": "path"}
+
+
+def test_create_s3_client_raises_when_json_string_botocore_config_is_invalid() -> None:
+    mock_session = MagicMock()
+    mock_aws_credentials = MagicMock()
+    mock_aws_credentials.get_boto3_session.return_value = mock_session
+    mock_aws_credentials.aws_client_parameters = {
+        "endpoint_url": "https://s3.example.com",
+        "config": '{"s3":{"addressing_style":"path"',
+    }
+
+    with pytest.raises(ValueError):
+        rss_ingest_flow._create_s3_client(mock_aws_credentials)
+
+
 @patch("flows.rss_ingest_flow.AwsCredentials")
 def test_check_s3_object_exists_task_returns_true_when_object_exists(mock_aws_credentials: MagicMock) -> None:
     mock_s3_client = MagicMock()

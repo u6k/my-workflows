@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
 import yaml
+from botocore.config import Config as BotocoreConfig
 from prefect import flow, get_run_logger, task
 from prefect.blocks.system import Secret
 from prefect.exceptions import MissingContextError
@@ -122,6 +123,65 @@ def _url_to_md5(url: str) -> str:
 def _build_s3_object_key(s3_prefix: str, article_id: str) -> str:
     normalized_prefix = s3_prefix.strip("/")
     return f"{normalized_prefix}/{article_id[:2]}/{article_id}.json"
+
+
+def _get_aws_client_parameters(aws_credentials: AwsCredentials) -> dict[str, Any]:
+    aws_client_parameters = getattr(aws_credentials, "aws_client_parameters", None)
+    if aws_client_parameters is None:
+        return {}
+
+    if hasattr(aws_client_parameters, "get_params_override"):
+        params_override = aws_client_parameters.get_params_override()
+        if isinstance(params_override, dict):
+            return params_override
+
+    if isinstance(aws_client_parameters, dict):
+        return aws_client_parameters
+
+    extracted: dict[str, Any] = {}
+    for key in ("endpoint_url", "config"):
+        value = getattr(aws_client_parameters, key, None)
+        if value is not None:
+            extracted[key] = value
+    return extracted
+
+
+def _normalize_botocore_config(raw_config: Any) -> BotocoreConfig | None:
+    if raw_config is None:
+        return None
+
+    if isinstance(raw_config, BotocoreConfig):
+        return raw_config
+
+    normalized_config = raw_config
+    if isinstance(raw_config, str):
+        normalized_config = raw_config.strip()
+        if normalized_config == "":
+            return None
+        try:
+            normalized_config = json.loads(normalized_config)
+        except json.JSONDecodeError as exc:
+            raise ValueError("aws_client_parameters.config must be valid JSON when provided as a string") from exc
+
+    if not isinstance(normalized_config, dict):
+        raise ValueError("aws_client_parameters.config must be a dict, JSON string, or botocore Config")
+
+    return BotocoreConfig(**normalized_config)
+
+
+def _create_s3_client(aws_credentials: AwsCredentials) -> Any:
+    client_kwargs: dict[str, Any] = {}
+    client_parameters = _get_aws_client_parameters(aws_credentials)
+
+    endpoint_url = client_parameters.get("endpoint_url")
+    if isinstance(endpoint_url, str) and endpoint_url:
+        client_kwargs["endpoint_url"] = endpoint_url
+
+    config = _normalize_botocore_config(client_parameters.get("config"))
+    if config is not None:
+        client_kwargs["config"] = config
+
+    return aws_credentials.get_boto3_session().client("s3", **client_kwargs)
 
 
 def _extract_links_from_feed_xml(feed_xml: bytes) -> list[str]:
@@ -304,7 +364,7 @@ def store_to_s3_task(article: dict[str, Any], storage: dict[str, Any], aws_crede
     object_key = _build_s3_object_key(storage["s3_prefix"], article_id)
 
     aws_credentials = AwsCredentials.load(aws_credentials_block_name)
-    s3_client = aws_credentials.get_boto3_session().client("s3")
+    s3_client = _create_s3_client(aws_credentials)
     s3_client.put_object(
         Bucket=storage["s3_bucket"],
         Key=object_key,
@@ -320,7 +380,7 @@ def check_s3_object_exists_task(article_url: str, storage: dict[str, Any], aws_c
     object_key = _build_s3_object_key(storage["s3_prefix"], article_id)
 
     aws_credentials = AwsCredentials.load(aws_credentials_block_name)
-    s3_client = aws_credentials.get_boto3_session().client("s3")
+    s3_client = _create_s3_client(aws_credentials)
     try:
         s3_client.head_object(Bucket=storage["s3_bucket"], Key=object_key)
         return {"exists": True, "id": article_id, "object_key": object_key}
