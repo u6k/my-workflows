@@ -239,7 +239,7 @@ def test_fetch_article_task_returns_content_and_metadata(mock_urlopen: MagicMock
 
     article = rss_ingest_flow.fetch_article_task.fn("https://example.com/posts/1")
 
-    assert article["id"] == "53b6f6a3bf5405c5e570d16e8f723e63"
+    assert article["id"] == "de0617c481337158695d4e48d5c275d2"
     assert article["url"] == "https://example.com/posts/1"
     assert article["title"] == "Example title"
     assert "Paragraph A." in article["content"]
@@ -283,11 +283,11 @@ def test_check_s3_object_exists_task_returns_true_when_object_exists(mock_aws_cr
     )
 
     assert result["exists"] is True
-    assert result["id"] == "53b6f6a3bf5405c5e570d16e8f723e63"
-    assert result["object_key"] == "rss/53/53b6f6a3bf5405c5e570d16e8f723e63.json"
+    assert result["id"] == "de0617c481337158695d4e48d5c275d2"
+    assert result["object_key"] == "rss/de/de0617c481337158695d4e48d5c275d2.json"
     mock_s3_client.head_object.assert_called_once_with(
         Bucket="news-bucket",
-        Key="rss/53/53b6f6a3bf5405c5e570d16e8f723e63.json",
+        Key="rss/de/de0617c481337158695d4e48d5c275d2.json",
     )
 
 
@@ -309,8 +309,8 @@ def test_check_s3_object_exists_task_returns_false_when_object_not_found(mock_aw
     )
 
     assert result["exists"] is False
-    assert result["id"] == "53b6f6a3bf5405c5e570d16e8f723e63"
-    assert result["object_key"] == "rss/53/53b6f6a3bf5405c5e570d16e8f723e63.json"
+    assert result["id"] == "de0617c481337158695d4e48d5c275d2"
+    assert result["object_key"] == "rss/de/de0617c481337158695d4e48d5c275d2.json"
 
 
 @patch("flows.rss_ingest_flow.urlopen")
