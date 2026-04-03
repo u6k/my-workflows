@@ -139,3 +139,7 @@ def test_design_macro_themes_with_ollama_task_returns_python_object(mock_invoke_
         "unclassifiable_rule": "rule",
     }
     assert mock_invoke_ollama_generate.call_args.kwargs["logger"] is mock_logger
+    mock_logger.info.assert_any_call(
+        "design_macro_themes_with_ollama_task result: %s",
+        {"taxonomy_summary": "summary", "themes": [], "unclassifiable_rule": "rule"},
+    )

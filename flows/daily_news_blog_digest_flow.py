@@ -260,6 +260,7 @@ def design_macro_themes_with_ollama_task(
     taxonomy = json.loads(raw_response)
     if not isinstance(taxonomy, dict):
         raise ValueError("Ollama taxonomy response must be a JSON object")
+    logger.info("design_macro_themes_with_ollama_task result: %s", taxonomy)
     return taxonomy
 
 

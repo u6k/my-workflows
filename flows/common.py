@@ -145,4 +145,7 @@ def invoke_ollama_generate(
         body = response.read().decode("utf-8")
 
     response_json = json.loads(body)
-    return str(response_json.get("response", "")).strip()
+    response_text = str(response_json.get("response", "")).strip()
+    if logger is not None:
+        logger.info("ollama response: %s", response_text)
+    return response_text
