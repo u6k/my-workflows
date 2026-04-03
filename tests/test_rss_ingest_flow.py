@@ -63,7 +63,7 @@ def test_validate_prerequisites_task_loads_blocks_and_json_secret(
     mock_get_run_logger: MagicMock,
 ) -> None:
     mock_get_run_logger.return_value = MagicMock()
-    mock_secret.load.return_value.get.return_value = '{"base_url":"http://localhost:11434","model":"llama3.1:8b"}'
+    mock_secret.load.return_value.get.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
 
     parsed_config = {
         "rss_urls": ["https://example.com/rss.xml", "https://example.com/rss.xml"],
@@ -84,13 +84,13 @@ def test_validate_prerequisites_task_loads_blocks_and_json_secret(
 @patch("flows.rss_ingest_flow.get_run_logger")
 @patch("flows.rss_ingest_flow.Secret")
 @patch("flows.rss_ingest_flow.AwsCredentials")
-def test_validate_prerequisites_task_raises_when_secret_json_is_invalid(
+def test_validate_prerequisites_task_raises_when_secret_value_is_not_dict(
     mock_aws_credentials: MagicMock,
     mock_secret: MagicMock,
     mock_get_run_logger: MagicMock,
 ) -> None:
     mock_get_run_logger.return_value = MagicMock()
-    mock_secret.load.return_value.get.return_value = "not-json"
+    mock_secret.load.return_value.get.return_value = "not-dict"
 
     parsed_config = {
         "rss_urls": ["https://example.com/rss.xml"],

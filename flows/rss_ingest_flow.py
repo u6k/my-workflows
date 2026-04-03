@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -179,13 +178,10 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
     ollama_secret_value = Secret.load(ollama_secret_block).get()
     logger.info("Prefect secret loaded: key=ollama_connection_secret_block name=%s", ollama_secret_block)
 
-    try:
-        ollama_connection = json.loads(ollama_secret_value)
-    except json.JSONDecodeError as exc:
-        raise ValueError("Ollama Secret block value must be valid JSON") from exc
+    if not isinstance(ollama_secret_value, dict):
+        raise ValueError("Ollama Secret block value must be a dict")
 
-    if not isinstance(ollama_connection, dict):
-        raise ValueError("Ollama Secret block value must be a JSON object")
+    ollama_connection = ollama_secret_value
 
     missing_ollama_keys = [
         key for key in REQUIRED_OLLAMA_CONNECTION_KEYS if not isinstance(ollama_connection.get(key), str) or not ollama_connection[key]
