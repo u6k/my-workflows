@@ -19,6 +19,9 @@ storage:
 prefect_blocks:
   aws_credentials_block: aws-credentials
   ollama_connection_secret_block: ollama-connection
+ollama:
+  models:
+    daily_news_blog_digest_flow: qwen3.5:0.8b
 """.strip(),
         encoding="utf-8",
     )

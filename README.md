@@ -58,6 +58,8 @@ cp config.example.yaml config.yaml
 - 保存JSON: Trafilatura による本文抽出結果 `content` と、生HTML `raw_html` の両方を保持
 - Ollama 要約: `briefing_summary` と `one_sentence_summary` を本文から生成して保存
 - `ollama.request_timeout_sec`: Ollama API呼び出しタイムアウト秒（省略時120秒）
+- `ollama.models.rss_ingest_flow`: `rss_ingest_flow` で使うモデル名
+- `ollama.models.daily_news_blog_digest_flow`: `daily-news-blog-digest-flow` で使うモデル名
 - `prefect_blocks.aws_credentials_block`: AWS Credentials Block 名
 - `prefect_blocks.ollama_connection_secret_block`: Ollama 接続情報(JSON)を格納した Secret Block 名
 
@@ -68,7 +70,7 @@ cp config.example.yaml config.yaml
 1. Prefect サーバーを起動し、`http://127.0.0.1:4200` を開く
 2. **Blocks** 画面で AWS Credentials Block を作成し、名前を `prefect_blocks.aws_credentials_block` の値と一致させる
 3. **Blocks** 画面で Secret Block を1つ作成し、値は JSON 形式で保存する（例）
-   - `{"base_url":"http://localhost:11434","model":"llama3.1:8b"}`
+   - `{"base_url":"http://localhost:11434"}`
 4. Secret Block の名前を `prefect_blocks.ollama_connection_secret_block` と一致させる
 
 > 注意: フローは Block 名・キー名のみログに出力し、Secret の値そのものはログ出力しません。

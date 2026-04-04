@@ -18,9 +18,21 @@ import trafilatura
 
 if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parent))
-    from common import create_s3_client, invoke_ollama_generate, load_ollama_connection_secret, load_yaml_config
+    from common import (
+        build_ollama_connection,
+        create_s3_client,
+        invoke_ollama_generate,
+        load_ollama_connection_secret,
+        load_yaml_config,
+    )
 else:
-    from .common import create_s3_client, invoke_ollama_generate, load_ollama_connection_secret, load_yaml_config
+    from .common import (
+        build_ollama_connection,
+        create_s3_client,
+        invoke_ollama_generate,
+        load_ollama_connection_secret,
+        load_yaml_config,
+    )
 
 
 REQUIRED_PREFECT_BLOCK_KEYS = (
@@ -124,13 +136,20 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise ValueError(f"config.prefect_blocks values must be non-empty strings: {', '.join(invalid_block_names)}")
 
     ollama = config.get("ollama")
-    if ollama is not None:
-        if not isinstance(ollama, dict):
-            raise ValueError("config.ollama must be an object")
+    if not isinstance(ollama, dict):
+        raise ValueError("config.ollama must be an object")
 
-        request_timeout_sec = ollama.get("request_timeout_sec")
-        if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
-            raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
+    request_timeout_sec = ollama.get("request_timeout_sec")
+    if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
+        raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
+
+    models = ollama.get("models")
+    if not isinstance(models, dict):
+        raise ValueError("config.ollama.models must be an object")
+
+    rss_ingest_model = models.get("rss_ingest_flow")
+    if not isinstance(rss_ingest_model, str) or not rss_ingest_model:
+        raise ValueError("config.ollama.models.rss_ingest_flow must be a non-empty string")
 
 
 def _get_task_logger() -> logging.Logger:
@@ -790,7 +809,8 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
 
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
-    ollama_connection = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
+    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
+    ollama_connection = build_ollama_connection(ollama_secret, config["ollama"]["models"]["rss_ingest_flow"])
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
 
     all_links: list[str] = []
