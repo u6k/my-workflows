@@ -282,7 +282,20 @@ def _create_s3_client(aws_credentials: AwsCredentials) -> Any:
 
 
 def _initialize_embeddings_sqlite(sqlite_path: str) -> None:
-    """埋め込み保存用SQLiteを初期化する。"""
+    """埋め込み保存用SQLiteを初期化する。
+
+    処理内容:
+        `sqlite_path` の親ディレクトリを必要に応じて作成し、`article_embeddings`
+        テーブルと検索用インデックスを作成する。
+    入力:
+        sqlite_path: 埋め込み保存先SQLiteファイルパス。
+    出力:
+        なし。
+    例外:
+        sqlite3.Error: DB作成やDDL実行に失敗した場合。
+    外部依存リソース:
+        ローカルファイルシステム、SQLite。
+    """
     db_path = Path(sqlite_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
@@ -791,7 +804,27 @@ def upsert_briefing_embedding_to_sqlite_task(
     sqlite_path: str,
     timeout_sec: int = 120,
 ) -> None:
-    """記事ブリーフィング要約を埋め込み化してSQLiteへ保存する。"""
+    """記事ブリーフィング要約を埋め込み化してSQLiteへ保存する。
+
+    処理内容:
+        `briefing_summary` を埋め込み化し、記事識別子・URL・タイトル・公開時刻・
+        取得時刻・要約（詳細/一文）・metadata・ベクトル・埋め込み時刻を
+        `article_embeddings` テーブルへ upsert 保存する。あわせて記事辞書へ
+        `embedding_json` と `embedding_timestamp` を付与する。
+    入力:
+        article: 記事辞書（`id`, `url`, `briefing_summary` 必須）。
+        embedding_connection: 埋め込みモデルのOllama接続設定。
+        sqlite_path: 埋め込み保存先SQLiteファイルパス。
+        timeout_sec: 埋め込みAPIタイムアウト秒。
+    出力:
+        なし。
+    例外:
+        ValueError: `briefing_summary` が空または文字列でない場合。
+        sqlite3.Error: DB書き込み失敗時。
+        Ollama呼び出し由来例外: 通信・解析失敗時。
+    外部依存リソース:
+        Ollama HTTP API、ローカルSQLiteファイル。
+    """
     logger = _get_task_logger()
     briefing_summary = article.get("briefing_summary")
     if not isinstance(briefing_summary, str) or not briefing_summary:
