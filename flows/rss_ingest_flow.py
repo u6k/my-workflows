@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import hashlib
 import json
+import sqlite3
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
@@ -22,6 +23,7 @@ if __package__ in {None, ""}:
         build_ollama_connection,
         create_s3_client,
         invoke_ollama_generate,
+        invoke_ollama_embeddings,
         load_ollama_connection_secret,
         load_yaml_config,
     )
@@ -30,6 +32,7 @@ else:
         build_ollama_connection,
         create_s3_client,
         invoke_ollama_generate,
+        invoke_ollama_embeddings,
         load_ollama_connection_secret,
         load_yaml_config,
     )
@@ -150,6 +153,16 @@ def _validate_config(config: dict[str, Any]) -> None:
     rss_ingest_model = models.get("rss_ingest_flow")
     if not isinstance(rss_ingest_model, str) or not rss_ingest_model:
         raise ValueError("config.ollama.models.rss_ingest_flow must be a non-empty string")
+    rss_ingest_embedding_model = models.get("rss_ingest_flow_embedding")
+    if not isinstance(rss_ingest_embedding_model, str) or not rss_ingest_embedding_model:
+        raise ValueError("config.ollama.models.rss_ingest_flow_embedding must be a non-empty string")
+
+    embeddings = config.get("embeddings", {})
+    if not isinstance(embeddings, dict):
+        raise ValueError("config.embeddings must be an object when provided")
+    sqlite_path = embeddings.get("sqlite_path", ".data/rss_embeddings.sqlite3")
+    if not isinstance(sqlite_path, str) or not sqlite_path:
+        raise ValueError("config.embeddings.sqlite_path must be a non-empty string")
 
 
 def _get_task_logger() -> logging.Logger:
@@ -265,6 +278,31 @@ def _create_s3_client(aws_credentials: AwsCredentials) -> Any:
         Prefectブロック、AWS SDK。
     """
     return create_s3_client(aws_credentials)
+
+
+def _initialize_embeddings_sqlite(sqlite_path: str) -> None:
+    """埋め込み保存用SQLiteを初期化する。"""
+    db_path = Path(sqlite_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS article_embeddings (
+                article_id TEXT PRIMARY KEY,
+                article_url TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                embedding_json TEXT NOT NULL,
+                source_text TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_article_embeddings_model
+            ON article_embeddings(model_name)
+            """
+        )
+        conn.commit()
 
 
 def _build_briefing_prompt(article_content: str) -> str:
@@ -736,6 +774,48 @@ def summarize_one_sentence_task(article_content: str, ollama_connection: dict[st
     return summary
 
 
+@task(name="upsert_briefing_embedding_to_sqlite_task")
+def upsert_briefing_embedding_to_sqlite_task(
+    article: dict[str, Any],
+    embedding_connection: dict[str, str],
+    sqlite_path: str,
+    timeout_sec: int = 120,
+) -> None:
+    """記事ブリーフィング要約を埋め込み化してSQLiteへ保存する。"""
+    logger = _get_task_logger()
+    briefing_summary = article.get("briefing_summary")
+    if not isinstance(briefing_summary, str) or not briefing_summary:
+        raise ValueError("article.briefing_summary must be a non-empty string")
+
+    embedding = invoke_ollama_embeddings(
+        ollama_connection=embedding_connection,
+        text=briefing_summary,
+        timeout_sec=timeout_sec,
+        logger=logger,
+    )
+    _initialize_embeddings_sqlite(sqlite_path)
+    with sqlite3.connect(sqlite_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO article_embeddings(article_id, article_url, model_name, embedding_json, source_text)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(article_id) DO UPDATE SET
+                article_url=excluded.article_url,
+                model_name=excluded.model_name,
+                embedding_json=excluded.embedding_json,
+                source_text=excluded.source_text
+            """,
+            (
+                str(article["id"]),
+                str(article["url"]),
+                embedding_connection["model"],
+                json.dumps(embedding),
+                briefing_summary,
+            ),
+        )
+        conn.commit()
+
+
 @flow(name="fetch_and_summarize_article_flow")
 def fetch_and_summarize_article_flow(
     article_url: str,
@@ -846,7 +926,10 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     validate_prerequisites_task(config)
     ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
     ollama_connection = build_ollama_connection(ollama_secret, config["ollama"]["models"]["rss_ingest_flow"])
+    embedding_connection = build_ollama_connection(ollama_secret, config["ollama"]["models"]["rss_ingest_flow_embedding"])
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
+    sqlite_path = config.get("embeddings", {}).get("sqlite_path", ".data/rss_embeddings.sqlite3")
+    _initialize_embeddings_sqlite(sqlite_path)
 
     all_links: list[str] = []
     for feed_url in list(dict.fromkeys(config["rss_urls"])):
@@ -884,6 +967,12 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
             article = fetch_and_summarize_article_flow(
                 article_url=link,
                 ollama_connection=ollama_connection,
+                timeout_sec=ollama_timeout_sec,
+            )
+            upsert_briefing_embedding_to_sqlite_task(
+                article=article,
+                embedding_connection=embedding_connection,
+                sqlite_path=sqlite_path,
                 timeout_sec=ollama_timeout_sec,
             )
         except Exception as exc:

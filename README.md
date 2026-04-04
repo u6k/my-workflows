@@ -59,7 +59,10 @@ cp config.example.yaml config.yaml
 - Ollama 要約: `briefing_summary` と `one_sentence_summary` を本文から生成して保存
 - `ollama.request_timeout_sec`: Ollama API呼び出しタイムアウト秒（省略時120秒）
 - `ollama.models.rss_ingest_flow`: `rss_ingest_flow` で使うモデル名
+- `ollama.models.rss_ingest_flow_embedding`: `rss_ingest_flow` でブリーフィング要約の埋め込み生成に使うモデル名
 - `ollama.models.daily_news_blog_digest_flow`: `daily-news-blog-digest-flow` で使うモデル名
+- `ollama.models.daily_news_blog_digest_flow_embedding`: `daily-news-blog-digest-flow` で記事分類用埋め込みに使うモデル名
+- `embeddings.sqlite_path`: RSS ingest 時にブリーフィング埋め込みを保存する SQLite ファイルパス（例: `.data/rss_embeddings.sqlite3`）
 - `prefect_blocks.aws_credentials_block`: AWS Credentials Block 名
 - `prefect_blocks.ollama_connection_secret_block`: Ollama 接続情報(JSON)を格納した Secret Block 名
 
@@ -81,6 +84,26 @@ cp config.example.yaml config.yaml
 source .venv/bin/activate
 python flows/rss_ingest_flow.py
 ```
+
+### 4. SQLite 埋め込みストアのセットアップ（RSS ingest）
+
+`rss_ingest_flow` は、記事ごとの `briefing_summary` を埋め込み化し、`embeddings.sqlite_path` で指定した SQLite に保存します。  
+SQLite ファイルはフロー実行時に自動作成されますが、事前に場所を固定したい場合は次の準備をしておくと安全です。
+
+```bash
+# 例: デフォルト保存先ディレクトリを事前作成
+mkdir -p .data
+
+# （任意）空のSQLiteファイルを事前作成
+python - <<'PY'
+import sqlite3
+conn = sqlite3.connect(".data/rss_embeddings.sqlite3")
+conn.close()
+print("initialized .data/rss_embeddings.sqlite3")
+PY
+```
+
+保存テーブルは `article_embeddings` です。`article_id` を主キーとして upsert されるため、同じ記事を再処理しても最新ベクトルで更新されます。
 
 ## Daily News Blog Digest Flow の設定と実行
 

@@ -23,6 +23,7 @@ prefect_blocks:
 ollama:
   models:
     rss_ingest_flow: qwen3.5:0.8b
+    rss_ingest_flow_embedding: nomic-embed-text
 """
 
 
@@ -39,6 +40,7 @@ prefect_blocks:
 ollama:
   models:
     rss_ingest_flow: qwen3.5:0.8b
+    rss_ingest_flow_embedding: nomic-embed-text
 """
 
 
@@ -80,6 +82,7 @@ ollama:
   request_timeout_sec: 0
   models:
     rss_ingest_flow: qwen3.5:0.8b
+    rss_ingest_flow_embedding: nomic-embed-text
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
   ollama_connection_secret_block: ollama-connection
@@ -326,6 +329,38 @@ def test_summarize_one_sentence_task_returns_ollama_response() -> None:
     assert mock_invoke_ollama_generate.call_args.kwargs["timeout_sec"] == 30
     assert mock_invoke_ollama_generate.call_args.kwargs["ollama_connection"]["model"] == "llama3.1:8b"
     assert mock_invoke_ollama_generate.call_args.kwargs["logger"] is mock_logger
+
+
+@patch("flows.rss_ingest_flow.invoke_ollama_embeddings")
+def test_upsert_briefing_embedding_to_sqlite_task_stores_embedding(mock_invoke_ollama_embeddings: MagicMock, tmp_path) -> None:
+    """Test case: upsert briefing embedding to sqlite task stores embedding."""
+    sqlite_path = tmp_path / "rss_embeddings.sqlite3"
+    mock_invoke_ollama_embeddings.return_value = [0.1, 0.2, 0.3]
+
+    rss_ingest_flow.upsert_briefing_embedding_to_sqlite_task.fn(
+        article={
+            "id": "article-1",
+            "url": "https://example.com/a",
+            "briefing_summary": "summary text",
+        },
+        embedding_connection={"base_url": "http://localhost:11434", "model": "nomic-embed-text"},
+        sqlite_path=str(sqlite_path),
+        timeout_sec=30,
+    )
+
+    import sqlite3
+
+    with sqlite3.connect(sqlite_path) as conn:
+        row = conn.execute(
+            "SELECT article_id, article_url, model_name, embedding_json, source_text FROM article_embeddings WHERE article_id=?",
+            ("article-1",),
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == "article-1"
+    assert row[1] == "https://example.com/a"
+    assert row[2] == "nomic-embed-text"
+    assert row[4] == "summary text"
 
 
 @patch("flows.rss_ingest_flow.trafilatura.extract")
