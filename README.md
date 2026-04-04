@@ -105,6 +105,7 @@ PY
 
 保存テーブルは `article_embeddings` です。`article_id` を主キーとして upsert されるため、同じ記事を再処理しても最新ベクトルで更新されます。  
 テーブルには作成時刻 `embedding_created_at_utc`（UTC ISO8601）と記事公開時刻 `article_published_timestamp`（取得できた場合）が格納されます。
+あわせて、`briefing_summary` と `one_sentence_summary` も保存するため、後段でS3本文を再読込せず SQLite 側の要約データを参照できます。
 
 ## Daily News Blog Digest Flow の設定と実行
 

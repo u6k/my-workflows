@@ -342,6 +342,7 @@ def test_upsert_briefing_embedding_to_sqlite_task_stores_embedding(mock_invoke_o
             "id": "article-1",
             "url": "https://example.com/a",
             "briefing_summary": "summary text",
+            "one_sentence_summary": "one sentence",
             "published_timestamp": "2026-04-04T00:00:00+00:00",
         },
         embedding_connection={"base_url": "http://localhost:11434", "model": "nomic-embed-text"},
@@ -354,7 +355,7 @@ def test_upsert_briefing_embedding_to_sqlite_task_stores_embedding(mock_invoke_o
     with sqlite3.connect(sqlite_path) as conn:
         row = conn.execute(
             """
-            SELECT article_id, article_url, model_name, embedding_json, source_text, article_published_timestamp, embedding_created_at_utc
+            SELECT article_id, article_url, model_name, embedding_json, source_text, briefing_summary, one_sentence_summary, article_published_timestamp, embedding_created_at_utc
             FROM article_embeddings
             WHERE article_id=?
             """,
@@ -366,8 +367,10 @@ def test_upsert_briefing_embedding_to_sqlite_task_stores_embedding(mock_invoke_o
     assert row[1] == "https://example.com/a"
     assert row[2] == "nomic-embed-text"
     assert row[4] == "summary text"
-    assert row[5] == "2026-04-04T00:00:00+00:00"
-    assert isinstance(row[6], str) and row[6] != ""
+    assert row[5] == "summary text"
+    assert row[6] == "one sentence"
+    assert row[7] == "2026-04-04T00:00:00+00:00"
+    assert isinstance(row[8], str) and row[8] != ""
 
 
 @patch("flows.rss_ingest_flow.trafilatura.extract")
