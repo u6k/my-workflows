@@ -108,6 +108,17 @@ python flows/daily_news_blog_digest_flow.py --target-date 2026-04-02 --config-pa
 
 ### Prefect Deployment から手動実行時にパラメーターを渡す
 
+Prefect の `Parameters` は、**フロー関数の引数**（このフローでは `target_date`, `config_path`）に対応します。  
+このため、性質としては次の2種類があります。
+
+- **定義（固定の受け口）**: `@flow` 関数シグネチャで定義される  
+  - 例: `def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str = "config.yaml")`
+- **実行時の値（毎回変更可能）**: 手動実行時に UI / CLI で指定する  
+  - 例: `target_date=2026-04-02`
+
+つまり、`Parameters` 自体は「Prefect 画面で自由に新規追加する項目」ではなく、**コード側で定義された引数に対して、実行時に値を与える仕組み**です。  
+（補足: deployment 作成時にデフォルト値を持たせることは可能で、手動実行時に上書きできます）
+
 1. まず deployment を作成します（未作成の場合）。
 
 ```bash
@@ -123,3 +134,10 @@ prefect deployment run "daily-news-blog-digest-flow/daily-news-blog-digest-manua
 ```
 
 3. Prefect UI で手動実行する場合は、**Deployments** 画面から対象 deployment を開き、**Run** を押して Parameters の `target_date` に `2026-04-02` のように入力して実行します。
+
+#### 使い分けの目安
+
+- 「通常は当日UTCで実行、たまに過去日を再実行したい」  
+  - コードのデフォルト（`target_date=None`）を使い、必要なときだけ Run 画面で `target_date` を入力
+- 「この deployment は常に前日分を対象にしたい」  
+  - deployment 側のデフォルト Parameters を設定し、例外時だけ手動実行で上書き
