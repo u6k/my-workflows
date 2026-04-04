@@ -488,9 +488,7 @@ def test_fetch_article_task_raises_when_status_is_not_200(mock_urlopen: MagicMoc
 
 @patch("flows.rss_ingest_flow.check_s3_object_exists_task")
 @patch("flows.rss_ingest_flow.store_to_s3_task")
-@patch("flows.rss_ingest_flow.summarize_one_sentence_task")
-@patch("flows.rss_ingest_flow.summarize_briefing_task")
-@patch("flows.rss_ingest_flow.fetch_article_task")
+@patch("flows.rss_ingest_flow.fetch_and_summarize_article_flow")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
 @patch("flows.rss_ingest_flow.load_ollama_connection_secret")
@@ -500,9 +498,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
     mock_load_ollama_connection_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
-    mock_fetch_article_task: MagicMock,
-    mock_summarize_briefing_task: MagicMock,
-    mock_summarize_one_sentence_task: MagicMock,
+    mock_fetch_and_summarize_article_flow: MagicMock,
     mock_store_to_s3_task: MagicMock,
     mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
@@ -522,12 +518,10 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
         {"exists": False, "id": "aaaa", "object_key": "rss/aa/aaaa.json"},
         {"exists": False, "id": "bbbb", "object_key": "rss/bb/bbbb.json"},
     ]
-    mock_fetch_article_task.side_effect = [
+    mock_fetch_and_summarize_article_flow.side_effect = [
         ValueError("unexpected status code: 500"),
         {"id": "bbbb", "url": "https://example.com/b", "title": "B", "metadata": {}, "content": "ok"},
     ]
-    mock_summarize_briefing_task.return_value = "summary"
-    mock_summarize_one_sentence_task.return_value = "one sentence"
     mock_store_to_s3_task.return_value = "rss/bb/bbbb.json"
 
     with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
@@ -537,7 +531,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
 
     mock_logger.warning.assert_called_once()
     warning_args = mock_logger.warning.call_args[0]
-    assert warning_args[0] == "article fetch skipped: url=%s reason=%s"
+    assert warning_args[0] == "article fetch/summarize skipped: url=%s reason=%s"
     assert warning_args[1] == "https://example.com/a"
     assert str(warning_args[2]) == "unexpected status code: 500"
     mock_logger.info.assert_any_call("feed links extracted: total=%d", 2)
@@ -547,9 +541,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
 
 @patch("flows.rss_ingest_flow.check_s3_object_exists_task")
 @patch("flows.rss_ingest_flow.store_to_s3_task")
-@patch("flows.rss_ingest_flow.summarize_one_sentence_task")
-@patch("flows.rss_ingest_flow.summarize_briefing_task")
-@patch("flows.rss_ingest_flow.fetch_article_task")
+@patch("flows.rss_ingest_flow.fetch_and_summarize_article_flow")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
 @patch("flows.rss_ingest_flow.load_ollama_connection_secret")
@@ -559,9 +551,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
     mock_load_ollama_connection_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
-    mock_fetch_article_task: MagicMock,
-    mock_summarize_briefing_task: MagicMock,
-    mock_summarize_one_sentence_task: MagicMock,
+    mock_fetch_and_summarize_article_flow: MagicMock,
     mock_store_to_s3_task: MagicMock,
     mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
@@ -581,12 +571,10 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
         {"exists": False, "id": "aaaa", "object_key": "rss/aa/aaaa.json"},
         {"exists": False, "id": "bbbb", "object_key": "rss/bb/bbbb.json"},
     ]
-    mock_fetch_article_task.side_effect = [
+    mock_fetch_and_summarize_article_flow.side_effect = [
         RuntimeError("boom"),
         {"id": "bbbb", "url": "https://example.com/b", "title": "B", "metadata": {}, "content": "ok"},
     ]
-    mock_summarize_briefing_task.return_value = "summary"
-    mock_summarize_one_sentence_task.return_value = "one sentence"
     mock_store_to_s3_task.return_value = "rss/bb/bbbb.json"
 
     with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
@@ -596,7 +584,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
 
     mock_logger.warning.assert_called_once()
     warning_args = mock_logger.warning.call_args[0]
-    assert warning_args[0] == "article fetch skipped: url=%s reason=%s"
+    assert warning_args[0] == "article fetch/summarize skipped: url=%s reason=%s"
     assert warning_args[1] == "https://example.com/a"
     assert str(warning_args[2]) == "boom"
     mock_logger.info.assert_any_call("article fetching completed: total=%d", 1)
@@ -604,9 +592,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
 
 @patch("flows.rss_ingest_flow.check_s3_object_exists_task")
 @patch("flows.rss_ingest_flow.store_to_s3_task")
-@patch("flows.rss_ingest_flow.summarize_one_sentence_task")
-@patch("flows.rss_ingest_flow.summarize_briefing_task")
-@patch("flows.rss_ingest_flow.fetch_article_task")
+@patch("flows.rss_ingest_flow.fetch_and_summarize_article_flow")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
 @patch("flows.rss_ingest_flow.load_ollama_connection_secret")
@@ -616,9 +602,7 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
     mock_load_ollama_connection_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
-    mock_fetch_article_task: MagicMock,
-    mock_summarize_briefing_task: MagicMock,
-    mock_summarize_one_sentence_task: MagicMock,
+    mock_fetch_and_summarize_article_flow: MagicMock,
     mock_store_to_s3_task: MagicMock,
     mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
@@ -645,18 +629,14 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
         mock_get_task_logger.return_value = mock_logger
         rss_ingest_flow.rss_ingest_flow.fn("config.yaml")
 
-    mock_fetch_article_task.assert_not_called()
-    mock_summarize_briefing_task.assert_not_called()
-    mock_summarize_one_sentence_task.assert_not_called()
+    mock_fetch_and_summarize_article_flow.assert_not_called()
     mock_store_to_s3_task.assert_not_called()
     mock_logger.info.assert_any_call("article skipped by existing s3 object: total=%d", 1)
 
 
 @patch("flows.rss_ingest_flow.check_s3_object_exists_task")
 @patch("flows.rss_ingest_flow.store_to_s3_task")
-@patch("flows.rss_ingest_flow.summarize_one_sentence_task")
-@patch("flows.rss_ingest_flow.summarize_briefing_task")
-@patch("flows.rss_ingest_flow.fetch_article_task")
+@patch("flows.rss_ingest_flow.fetch_and_summarize_article_flow")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
 @patch("flows.rss_ingest_flow.load_ollama_connection_secret")
@@ -666,9 +646,7 @@ def test_rss_ingest_flow_skips_article_when_summarization_fails(
     mock_load_ollama_connection_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
-    mock_fetch_article_task: MagicMock,
-    mock_summarize_briefing_task: MagicMock,
-    mock_summarize_one_sentence_task: MagicMock,
+    mock_fetch_and_summarize_article_flow: MagicMock,
     mock_store_to_s3_task: MagicMock,
     mock_check_s3_object_exists_task: MagicMock,
 ) -> None:
@@ -685,8 +663,7 @@ def test_rss_ingest_flow_skips_article_when_summarization_fails(
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_fetch_feed_task.return_value = ["https://example.com/a"]
     mock_check_s3_object_exists_task.return_value = {"exists": False, "id": "aaaa", "object_key": "rss/aa/aaaa.json"}
-    mock_fetch_article_task.return_value = {"id": "aaaa", "url": "https://example.com/a", "title": "A", "metadata": {}, "content": "ok"}
-    mock_summarize_briefing_task.side_effect = RuntimeError("ollama error")
+    mock_fetch_and_summarize_article_flow.side_effect = RuntimeError("ollama error")
 
     with patch("flows.rss_ingest_flow._get_task_logger") as mock_get_task_logger:
         mock_logger = MagicMock()
@@ -696,7 +673,7 @@ def test_rss_ingest_flow_skips_article_when_summarization_fails(
     mock_store_to_s3_task.assert_not_called()
     mock_logger.warning.assert_called_once()
     warning_args = mock_logger.warning.call_args[0]
-    assert warning_args[0] == "article summarize skipped: url=%s reason=%s"
+    assert warning_args[0] == "article fetch/summarize skipped: url=%s reason=%s"
     assert warning_args[1] == "https://example.com/a"
     assert str(warning_args[2]) == "ollama error"
 
@@ -716,3 +693,82 @@ def test_normalize_extracted_link_extracts_google_redirect_url() -> None:
     normalized = rss_ingest_flow._normalize_extracted_link(link)
 
     assert normalized == "https://example.com/dest"
+
+
+@patch("flows.rss_ingest_flow.fetch_and_summarize_article_flow")
+@patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
+@patch("flows.rss_ingest_flow.load_config_task")
+def test_fetch_summarize_url_flow_returns_article_with_summaries(
+    mock_load_config_task: MagicMock,
+    mock_load_ollama_connection_secret: MagicMock,
+    mock_validate_prerequisites_task: MagicMock,
+    mock_fetch_and_summarize_article_flow: MagicMock,
+) -> None:
+    mock_load_config_task.return_value = {
+        "rss_urls": ["https://example.com/rss.xml"],
+        "retry": {"max_retries": 3},
+        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        "ollama": {"request_timeout_sec": 45, "models": {"rss_ingest_flow": "qwen3.5:0.8b"}},
+        "prefect_blocks": {
+            "aws_credentials_block": "aws-credentials-prod",
+            "ollama_connection_secret_block": "ollama-connection",
+        },
+    }
+    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434"}
+    mock_fetch_and_summarize_article_flow.return_value = {
+        "id": "aaaa",
+        "url": "https://example.com/a",
+        "title": "A",
+        "metadata": {},
+        "content": "本文",
+        "briefing_summary": "briefing summary",
+        "one_sentence_summary": "one sentence",
+        "raw_html": "<html></html>",
+    }
+
+    article = rss_ingest_flow.fetch_summarize_url_flow.fn("https://example.com/a", "config.yaml")
+
+    assert article["briefing_summary"] == "briefing summary"
+    assert article["one_sentence_summary"] == "one sentence"
+    mock_validate_prerequisites_task.assert_called_once()
+    mock_fetch_and_summarize_article_flow.assert_called_once()
+    assert mock_fetch_and_summarize_article_flow.call_args.kwargs["article_url"] == "https://example.com/a"
+    assert mock_fetch_and_summarize_article_flow.call_args.kwargs["timeout_sec"] == 45
+
+
+def test_fetch_summarize_url_flow_raises_when_url_is_invalid() -> None:
+    with pytest.raises(ValueError):
+        rss_ingest_flow.fetch_summarize_url_flow.fn("ftp://example.com/a", "config.yaml")
+
+
+@patch("flows.rss_ingest_flow.summarize_one_sentence_task")
+@patch("flows.rss_ingest_flow.summarize_briefing_task")
+@patch("flows.rss_ingest_flow.fetch_article_task")
+def test_fetch_and_summarize_article_flow_calls_tasks_in_order(
+    mock_fetch_article_task: MagicMock,
+    mock_summarize_briefing_task: MagicMock,
+    mock_summarize_one_sentence_task: MagicMock,
+) -> None:
+    mock_fetch_article_task.return_value = {
+        "id": "aaaa",
+        "url": "https://example.com/a",
+        "title": "A",
+        "metadata": {},
+        "content": "本文",
+        "raw_html": "<html></html>",
+    }
+    mock_summarize_briefing_task.return_value = "briefing summary"
+    mock_summarize_one_sentence_task.return_value = "one sentence"
+
+    article = rss_ingest_flow.fetch_and_summarize_article_flow.fn(
+        article_url="https://example.com/a",
+        ollama_connection={"base_url": "http://localhost:11434", "model": "qwen3.5:0.8b"},
+        timeout_sec=20,
+    )
+
+    assert article["briefing_summary"] == "briefing summary"
+    assert article["one_sentence_summary"] == "one sentence"
+    mock_fetch_article_task.assert_called_once_with("https://example.com/a")
+    assert mock_summarize_briefing_task.call_args.kwargs["timeout_sec"] == 20
+    assert mock_summarize_one_sentence_task.call_args.kwargs["timeout_sec"] == 20

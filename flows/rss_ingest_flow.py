@@ -736,6 +736,41 @@ def summarize_one_sentence_task(article_content: str, ollama_connection: dict[st
     return summary
 
 
+@flow(name="fetch_and_summarize_article_flow")
+def fetch_and_summarize_article_flow(
+    article_url: str,
+    ollama_connection: dict[str, str],
+    timeout_sec: int = 120,
+) -> dict[str, Any]:
+    """単一記事の取得・本文抽出・要約を実行するサブフロー。
+
+    処理内容:
+        記事取得タスクと2種類の要約タスクを順に実行し、要約付き記事辞書を返す。
+    入力:
+        article_url: 記事URL。
+        ollama_connection: Ollama接続設定。
+        timeout_sec: APIタイムアウト秒。
+    出力:
+        dict[str, Any]: `fetch_article_task` の結果に要約2種を付与した辞書。
+    例外:
+        記事取得・要約処理で発生した例外をそのまま送出する。
+    外部依存リソース:
+        HTTP記事ページ、Ollama HTTP API。
+    """
+    article = fetch_article_task(article_url)
+    article["briefing_summary"] = summarize_briefing_task(
+        article_content=article["content"],
+        ollama_connection=ollama_connection,
+        timeout_sec=timeout_sec,
+    )
+    article["one_sentence_summary"] = summarize_one_sentence_task(
+        article_content=article["content"],
+        ollama_connection=ollama_connection,
+        timeout_sec=timeout_sec,
+    )
+    return article
+
+
 @task(name="load_config_task")
 def load_config_task(config_path: str = "config.yaml") -> dict[str, Any]:
     """RSS収集フロー設定を読み込み、検証済みで返す。
@@ -846,24 +881,13 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
             continue
 
         try:
-            article = fetch_article_task(link)
-        except Exception as exc:
-            logger.warning("article fetch skipped: url=%s reason=%s", link, exc)
-            continue
-
-        try:
-            article["briefing_summary"] = summarize_briefing_task(
-                article_content=article["content"],
-                ollama_connection=ollama_connection,
-                timeout_sec=ollama_timeout_sec,
-            )
-            article["one_sentence_summary"] = summarize_one_sentence_task(
-                article_content=article["content"],
+            article = fetch_and_summarize_article_flow(
+                article_url=link,
                 ollama_connection=ollama_connection,
                 timeout_sec=ollama_timeout_sec,
             )
         except Exception as exc:
-            logger.warning("article summarize skipped: url=%s reason=%s", link, exc)
+            logger.warning("article fetch/summarize skipped: url=%s reason=%s", link, exc)
             continue
 
         object_key = store_to_s3_task(
@@ -888,6 +912,50 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     logger.info("article fetching completed: total=%d", article_count)
     logger.info("article storing completed: total=%d", stored_count)
     logger.info("article skipped by existing s3 object: total=%d", skipped_existing_count)
+
+
+@flow(name="fetch_summarize_url_flow")
+def fetch_summarize_url_flow(article_url: str, config_path: str = "config.yaml") -> dict[str, Any]:
+    """単一URLの記事取得・本文抽出・要約を実行する独立フロー。
+
+    処理内容:
+        設定読込、Prefectブロック検証、記事取得、Ollama要約（詳細/一文）を順に実行し、
+        流用しやすい記事辞書として返す。
+    入力:
+        article_url: 取得対象の記事URL。
+        config_path: 設定ファイルパス。
+    出力:
+        dict[str, Any]: `id/url/title/content/metadata/briefing_summary/one_sentence_summary/raw_html` を含む記事辞書。
+    例外:
+        ValueError: URL形式不正、設定不正、要約失敗時など。
+        外部I/O由来例外: HTTP取得・Prefectブロック参照失敗時。
+    外部依存リソース:
+        ローカル設定ファイル、HTTP記事ページ、Prefect Blocks、Ollama API。
+    """
+    if not isinstance(article_url, str) or not article_url.startswith(("http://", "https://")):
+        raise ValueError("article_url must start with http:// or https://")
+
+    logger = _get_task_logger()
+    config = load_config_task(config_path)
+    validate_prerequisites_task(config)
+    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
+    ollama_connection = build_ollama_connection(ollama_secret, config["ollama"]["models"]["rss_ingest_flow"])
+    ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
+
+    article = fetch_and_summarize_article_flow(
+        article_url=article_url,
+        ollama_connection=ollama_connection,
+        timeout_sec=ollama_timeout_sec,
+    )
+
+    logger.info(
+        "single article summarize completed: id=%s url=%s title=%s content_length=%d",
+        article["id"],
+        article["url"],
+        article["title"],
+        len(article["content"]),
+    )
+    return article
 
 
 if __name__ == "__main__":
