@@ -22,6 +22,7 @@ prefect_blocks:
 ollama:
   models:
     daily_news_blog_digest_flow: qwen3.5:0.8b
+    daily_news_blog_digest_flow_embedding: nomic-embed-text
 """.strip(),
         encoding="utf-8",
     )
@@ -172,7 +173,12 @@ def test_validate_daily_digest_config_raises_when_max_articles_invalid() -> None
                     "aws_credentials_block": "aws-credentials",
                     "ollama_connection_secret_block": "ollama-secret",
                 },
-                "ollama": {"models": {"daily_news_blog_digest_flow": "llama3.1:8b"}},
+                "ollama": {
+                    "models": {
+                        "daily_news_blog_digest_flow": "llama3.1:8b",
+                        "daily_news_blog_digest_flow_embedding": "nomic-embed-text",
+                    }
+                },
             }
         )
 
@@ -206,24 +212,14 @@ def test_design_macro_themes_with_ollama_task_returns_python_object(mock_invoke_
     )
 
 
-@patch("flows.daily_news_blog_digest_flow.invoke_ollama_generate")
-def test_assign_articles_to_themes_with_ollama_task_returns_assignments(mock_invoke_ollama_generate: MagicMock) -> None:
+@patch("flows.daily_news_blog_digest_flow.invoke_ollama_embeddings")
+def test_assign_articles_to_themes_with_ollama_task_returns_assignments(mock_invoke_ollama_embeddings: MagicMock) -> None:
     """Test case: assign articles to themes with ollama task returns assignments."""
-    mock_invoke_ollama_generate.side_effect = [
-        """
-{
-  "theme_id": "T01",
-  "confidence": 0.95,
-  "reason": "policy news"
-}
-""".strip(),
-        """
-{
-  "theme_id": "UNCLASSIFIABLE",
-  "confidence": 0.40,
-  "reason": "edge case"
-}
-""".strip(),
+    mock_invoke_ollama_embeddings.side_effect = [
+        [1.0, 0.0],  # T01
+        [0.0, 1.0],  # T02
+        [0.9, 0.1],  # article A
+        [0.1, 0.9],  # article B
     ]
 
     result = daily_news_blog_digest_flow.assign_articles_to_themes_with_ollama_task.fn(
@@ -237,7 +233,7 @@ def test_assign_articles_to_themes_with_ollama_task_returns_assignments(mock_inv
                 {"theme_id": "T02", "theme_name": "Markets"},
             ]
         },
-        ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+        embedding_connection={"base_url": "http://localhost:11434", "model": "nomic-embed-text"},
         timeout_sec=60,
     )
 
@@ -245,36 +241,32 @@ def test_assign_articles_to_themes_with_ollama_task_returns_assignments(mock_inv
         {
             "article": {"id": "a", "title": "A", "one_sentence_summary": "A summary"},
             "theme_id": "T01",
-            "confidence": 0.95,
-            "reason": "policy news",
+            "confidence": pytest.approx(0.993884, rel=1e-6),
+            "reason": "embedding cosine similarity",
         },
         {
             "article": {"id": "b", "title": "B", "one_sentence_summary": "B summary"},
-            "theme_id": "UNCLASSIFIABLE",
-            "confidence": 0.40,
-            "reason": "edge case",
+            "theme_id": "T02",
+            "confidence": pytest.approx(0.993884, rel=1e-6),
+            "reason": "embedding cosine similarity",
         },
     ]
-    assert mock_invoke_ollama_generate.call_count == 2
+    assert mock_invoke_ollama_embeddings.call_count == 4
 
 
-@patch("flows.daily_news_blog_digest_flow.invoke_ollama_generate")
+@patch("flows.daily_news_blog_digest_flow.invoke_ollama_embeddings")
 def test_assign_articles_to_themes_with_ollama_task_raises_when_unknown_theme_id(
-    mock_invoke_ollama_generate: MagicMock,
+    mock_invoke_ollama_embeddings: MagicMock,
 ) -> None:
-    """Test case: assign articles to themes with ollama task raises when unknown theme id."""
-    mock_invoke_ollama_generate.return_value = """
-{
-  "theme_id": "T99",
-  "confidence": 0.8,
-  "reason": "unknown"
-}
-""".strip()
-
-    with pytest.raises(ValueError, match="assignment.theme_id is not in taxonomy"):
+    """Test case: assign articles to themes with ollama task raises when embedding dims mismatch."""
+    mock_invoke_ollama_embeddings.side_effect = [
+        [1.0, 0.0],  # theme
+        [0.3, 0.4, 0.5],  # article
+    ]
+    with pytest.raises(ValueError, match="embedding vectors must have same dimension"):
         daily_news_blog_digest_flow.assign_articles_to_themes_with_ollama_task.fn(
             articles=[{"id": "a", "title": "A", "one_sentence_summary": "A summary"}],
             taxonomy={"themes": [{"theme_id": "T01"}]},
-            ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+            embedding_connection={"base_url": "http://localhost:11434", "model": "nomic-embed-text"},
             timeout_sec=60,
         )

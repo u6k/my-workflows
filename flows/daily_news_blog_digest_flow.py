@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
+import sqlite3
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +20,7 @@ if __package__ in {None, ""}:
         build_ollama_connection,
         create_s3_client,
         invoke_ollama_generate,
+        invoke_ollama_embeddings,
         load_ollama_connection_secret,
         load_yaml_config,
     )
@@ -26,6 +29,7 @@ else:
         build_ollama_connection,
         create_s3_client,
         invoke_ollama_generate,
+        invoke_ollama_embeddings,
         load_ollama_connection_secret,
         load_yaml_config,
     )
@@ -122,6 +126,9 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
     digest_model = models.get("daily_news_blog_digest_flow")
     if not isinstance(digest_model, str) or not digest_model:
         raise ValueError("config.ollama.models.daily_news_blog_digest_flow must be a non-empty string")
+    embedding_model = models.get("daily_news_blog_digest_flow_embedding")
+    if not isinstance(embedding_model, str) or not embedding_model:
+        raise ValueError("config.ollama.models.daily_news_blog_digest_flow_embedding must be a non-empty string")
 
     max_articles = config.get("max_articles")
     if max_articles is not None and (not isinstance(max_articles, int) or max_articles <= 0):
@@ -261,58 +268,22 @@ def _build_macro_theme_prompt(articles: list[dict[str, str]]) -> str:
 """
 
 
-def _build_single_article_assignment_prompt(
-    article: dict[str, Any],
-    taxonomy: dict[str, Any],
-) -> str:
-    """単一記事とテーマ体系から記事割当プロンプトを構築する。
+def _build_theme_embedding_text(theme: dict[str, Any]) -> str:
+    """テーマ埋め込み用の連結テキストを返す。"""
+    fields = [
+        str(theme.get("theme_name", "")),
+        str(theme.get("description", "")),
+        " ".join(str(value) for value in theme.get("include_rules", []) if isinstance(value, str)),
+        " ".join(str(value) for value in theme.get("example_keywords", []) if isinstance(value, str)),
+    ]
+    return "\n".join(field for field in fields if field)
 
-    処理内容:
-        単一記事を割当用に圧縮し、taxonomyと合わせてLLMへ渡すJSONプロンプトを作成する。
-    入力:
-        article: 単一記事（id/title/one_sentence_summary などを含む）。
-        taxonomy: `themes` を含むテーマ体系辞書。
-    出力:
-        str: 記事割当用プロンプト文字列。
-    例外:
-        なし。
-    外部依存リソース:
-        なし。
-    """
-    compact_article = {
-        "id": article.get("id"),
-        "title": article["title"],
-        "one_sentence_summary": article["one_sentence_summary"],
-    }
-    article_json = json.dumps(compact_article, ensure_ascii=False, indent=2)
-    taxonomy_json = json.dumps(taxonomy, ensure_ascii=False, indent=2)
-    return f"""あなたはニュース記事の分類担当者です。渡された taxonomy に従って、記事を1つのテーマへ割り当ててください。
 
-# 制約
-- 記事は必ず1つの theme_id に割り当てる
-- taxonomy にない theme_id は使わない
-- どうしても分類不能なら "UNCLASSIFIABLE" を使う
-- confidence は 0.0 〜 1.0 の実数
-- 出力はJSONのみ
-
-# 入力 taxonomy
-{taxonomy_json}
-
-# 入力記事（1件）
-{article_json}
-
-# タスク
-1. 記事について最も適切な theme_id を選ぶ
-2. 1行理由（reason）を付ける
-3. 信頼度（confidence）を 0.0〜1.0 で付ける
-
-# 出力JSONスキーマ
-{{
-  "theme_id": "T01",
-  "confidence": 0.87,
-  "reason": "string"
-}}
-"""
+def _build_article_embedding_text(article: dict[str, Any]) -> str:
+    """記事埋め込み用の連結テキストを返す。"""
+    title = str(article.get("title", ""))
+    one_sentence_summary = str(article.get("one_sentence_summary", ""))
+    return f"{title}\n{one_sentence_summary}".strip()
 
 
 def _validate_theme_ids(taxonomy: dict[str, Any]) -> set[str]:
@@ -324,6 +295,18 @@ def _validate_theme_ids(taxonomy: dict[str, Any]) -> set[str]:
     if not theme_ids:
         raise ValueError("taxonomy.themes must include at least one theme_id")
     return theme_ids
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """2つのベクトルのコサイン類似度を計算する。"""
+    if len(a) != len(b):
+        raise ValueError("embedding vectors must have same dimension")
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 @task(name="load_daily_digest_config_task")
@@ -508,39 +491,32 @@ def design_macro_themes_with_ollama_task(
 def assign_articles_to_themes_with_ollama_task(
     articles: list[dict[str, Any]],
     taxonomy: dict[str, Any],
-    ollama_connection: dict[str, str],
+    embedding_connection: dict[str, str],
     timeout_sec: int = 120,
 ) -> list[dict[str, Any]]:
-    """テーマ体系にもとづき記事を単一テーマへ割り当てる。
+    """埋め込み類似度にもとづき記事を単一テーマへ割り当てる。
 
     処理内容:
-        taxonomy から有効な theme_id を抽出し、記事群をLLM分類して
-        `article/theme_id/confidence/reason` 配列を返す。
+        taxonomy と記事を埋め込み化してSQLiteに保持し、各記事と各テーマの
+        コサイン類似度を計算して最上位テーマを割り当てる。
     入力:
         articles: 記事配列。
         taxonomy: `design_macro_themes_with_ollama_task` の出力。
-        ollama_connection: Ollama接続設定（base_url/model）。
+        embedding_connection: 埋め込みモデルのOllama接続設定（base_url/model）。
         timeout_sec: API呼び出しタイムアウト秒。
     出力:
         list[dict[str, Any]]: 記事割当配列。
     例外:
         ValueError: taxonomy不正、応答不正、割当不備の場合。
-        JSONDecodeError: Ollama応答のJSON解析失敗時。
+        ValueError: 埋め込み次元不一致など計算不正時。
     外部依存リソース:
-        Ollama HTTP API。
+        Ollama HTTP API、SQLite（インメモリ）。
     """
     logger = _get_task_logger()
-    theme_ids = _validate_theme_ids(taxonomy)
+    valid_theme_ids = _validate_theme_ids(taxonomy)
 
     compact_articles = [
-        {
-            "source_article": article,
-            "classification_input": {
-                "id": article.get("id"),
-                "title": article["title"],
-                "one_sentence_summary": article["one_sentence_summary"],
-            },
-        }
+        article
         for article in articles
         if isinstance(article.get("title"), str)
         and article["title"]
@@ -550,35 +526,72 @@ def assign_articles_to_themes_with_ollama_task(
     if not compact_articles:
         raise ValueError("articles must include at least one valid title and one_sentence_summary pair")
 
-    normalized_assignments: list[dict[str, Any]] = []
-    for article in compact_articles:
-        prompt = _build_single_article_assignment_prompt(article["classification_input"], taxonomy)
-        raw_response = invoke_ollama_generate(
-            ollama_connection=ollama_connection,
-            prompt=prompt,
+    themes = taxonomy.get("themes")
+    if not isinstance(themes, list):
+        raise ValueError("taxonomy.themes must be a list")
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE embeddings (
+            entity_type TEXT NOT NULL,
+            entity_key TEXT NOT NULL,
+            vector_json TEXT NOT NULL
+        )
+        """
+    )
+
+    for theme in themes:
+        if not isinstance(theme, dict):
+            continue
+        theme_id = theme.get("theme_id")
+        if not isinstance(theme_id, str) or theme_id not in valid_theme_ids:
+            continue
+        embedding = invoke_ollama_embeddings(
+            ollama_connection=embedding_connection,
+            text=_build_theme_embedding_text(theme),
             timeout_sec=timeout_sec,
-            response_format="json",
             logger=logger,
         )
-        if not raw_response:
-            raise ValueError("Ollama response does not contain assignment JSON text")
+        conn.execute(
+            "INSERT INTO embeddings(entity_type, entity_key, vector_json) VALUES (?, ?, ?)",
+            ("theme", theme_id, json.dumps(embedding)),
+        )
 
-        assignment = json.loads(raw_response)
-        if not isinstance(assignment, dict):
-            raise ValueError("assignment response must be a JSON object")
-        theme_id = assignment.get("theme_id")
-        if not isinstance(theme_id, str) or not theme_id:
-            raise ValueError("assignment.theme_id must be a non-empty string")
-        if theme_id not in theme_ids and theme_id != "UNCLASSIFIABLE":
-            raise ValueError(f"assignment.theme_id is not in taxonomy: {theme_id}")
+    normalized_assignments: list[dict[str, Any]] = []
+    for article in compact_articles:
+        article_key = str(article.get("id") or article.get("title"))
+        article_embedding = invoke_ollama_embeddings(
+            ollama_connection=embedding_connection,
+            text=_build_article_embedding_text(article),
+            timeout_sec=timeout_sec,
+            logger=logger,
+        )
+        conn.execute(
+            "INSERT INTO embeddings(entity_type, entity_key, vector_json) VALUES (?, ?, ?)",
+            ("article", article_key, json.dumps(article_embedding)),
+        )
+
+        best_theme_id = "UNCLASSIFIABLE"
+        best_similarity = -1.0
+        for theme_id, vector_json in conn.execute(
+            "SELECT entity_key, vector_json FROM embeddings WHERE entity_type='theme'"
+        ):
+            similarity = _cosine_similarity(article_embedding, json.loads(vector_json))
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_theme_id = str(theme_id)
+
         normalized_assignments.append(
             {
-                "article": article["source_article"],
-                "theme_id": theme_id,
-                "confidence": assignment.get("confidence"),
-                "reason": assignment.get("reason"),
+                "article": article,
+                "theme_id": best_theme_id,
+                "confidence": round(float(best_similarity), 6),
+                "reason": "embedding cosine similarity",
             }
         )
+
+    conn.close()
 
     if len(normalized_assignments) != len(compact_articles):
         raise ValueError("assignment count must match compact article count")
@@ -621,6 +634,10 @@ def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str
         ollama_secret,
         config["ollama"]["models"]["daily_news_blog_digest_flow"],
     )
+    embedding_connection = build_ollama_connection(
+        ollama_secret,
+        config["ollama"]["models"]["daily_news_blog_digest_flow_embedding"],
+    )
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
     taxonomy = design_macro_themes_with_ollama_task(
         articles=articles,
@@ -630,7 +647,7 @@ def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str
     assignments = assign_articles_to_themes_with_ollama_task(
         articles=articles,
         taxonomy=taxonomy,
-        ollama_connection=ollama_connection,
+        embedding_connection=embedding_connection,
         timeout_sec=ollama_timeout_sec,
     )
     return {
