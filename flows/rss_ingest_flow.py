@@ -697,38 +697,29 @@ def store_to_s3_task(article: dict[str, Any], storage: dict[str, Any], aws_crede
 
 
 @task(name="check_s3_object_exists_task")
-def check_s3_object_exists_task(article_url: str, storage: dict[str, Any], aws_credentials_block_name: str) -> dict[str, Any]:
-    """記事URL対応のS3オブジェクト存在有無を確認する。
+def check_s3_object_exists_task(article_url: str, sqlite_path: str) -> dict[str, Any]:
+    """記事URL対応の埋め込みレコード存在有無を確認する。
 
     処理内容:
-        URLをID化してオブジェクトキーを計算し、`head_object` を呼び出して存在判定する。
-        404系エラーは未存在として扱い、その他エラーは再送出する。
+        URLをID化して `article_embeddings` テーブルの存在確認を行う。
     入力:
         article_url: 記事URL。
-        storage: `s3_bucket` / `s3_prefix` を含む設定。
-        aws_credentials_block_name: AwsCredentialsブロック名。
+        sqlite_path: 埋め込み保存先SQLiteファイルパス。
     出力:
-        dict[str, Any]: `exists` / `id` / `object_key` を含む辞書。
+        dict[str, Any]: `exists` / `id` を含む辞書。
     例外:
-        boto3由来例外: 404系以外のS3エラー時。
+        sqlite3.Error: DBアクセス失敗時。
     外部依存リソース:
-        AWS S3、Prefect AwsCredentialsブロック。
+        ローカルSQLiteファイル。
     """
     article_id = _url_to_md5(article_url)
-    object_key = _build_s3_object_key(storage["s3_prefix"], article_id)
-
-    aws_credentials = AwsCredentials.load(aws_credentials_block_name)
-    s3_client = _create_s3_client(aws_credentials)
-    try:
-        s3_client.head_object(Bucket=storage["s3_bucket"], Key=object_key)
-        return {"exists": True, "id": article_id, "object_key": object_key}
-    except Exception as exc:
-        response = getattr(exc, "response", {})
-        error = response.get("Error", {})
-        error_code = str(error.get("Code", ""))
-        if error_code in {"404", "NoSuchKey", "NotFound"}:
-            return {"exists": False, "id": article_id, "object_key": object_key}
-        raise
+    _initialize_embeddings_sqlite(sqlite_path)
+    with sqlite3.connect(sqlite_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM article_embeddings WHERE article_id=? LIMIT 1",
+            (article_id,),
+        ).fetchone()
+    return {"exists": row is not None, "id": article_id}
 
 
 @task(name="check_embedding_record_exists_task")

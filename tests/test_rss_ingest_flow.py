@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -475,54 +477,35 @@ def test_create_s3_client_raises_when_json_string_botocore_config_is_invalid() -
         rss_ingest_flow._create_s3_client(mock_aws_credentials)
 
 
-@patch("flows.rss_ingest_flow.AwsCredentials")
-def test_check_s3_object_exists_task_returns_true_when_object_exists(mock_aws_credentials: MagicMock) -> None:
-    """Test case: check s3 object exists task returns true when object exists."""
-    mock_s3_client = MagicMock()
-    mock_session = MagicMock()
-    mock_session.client.return_value = mock_s3_client
-    mock_credentials = mock_aws_credentials.load.return_value
-    mock_credentials.get_boto3_session.return_value = mock_session
-    mock_credentials.aws_client_parameters = None
-
+def test_check_s3_object_exists_task_returns_true_when_embedding_record_exists(tmp_path: Path) -> None:
+    """Test case: check s3 object exists task returns true when embedding record exists."""
+    sqlite_path = tmp_path / "rss_embeddings.sqlite3"
+    rss_ingest_flow._initialize_embeddings_sqlite(str(sqlite_path))
+    with sqlite3.connect(sqlite_path) as conn:
+        conn.execute(
+            "INSERT INTO article_embeddings (article_id, model, embedding_json) VALUES (?, ?, ?)",
+            ("de0617c481337158695d4e48d5c275d2", "nomic-embed-text", "[0.1,0.2]"),
+        )
+        conn.commit()
     result = rss_ingest_flow.check_s3_object_exists_task.fn(
         article_url="https://example.com/posts/1",
-        storage={"s3_bucket": "news-bucket", "s3_prefix": "rss"},
-        aws_credentials_block_name="aws-credentials-prod",
+        sqlite_path=str(sqlite_path),
     )
 
     assert result["exists"] is True
     assert result["id"] == "de0617c481337158695d4e48d5c275d2"
-    assert result["object_key"] == "rss/de/de0617c481337158695d4e48d5c275d2.json"
-    mock_s3_client.head_object.assert_called_once_with(
-        Bucket="news-bucket",
-        Key="rss/de/de0617c481337158695d4e48d5c275d2.json",
-    )
 
 
-@patch("flows.rss_ingest_flow.AwsCredentials")
-def test_check_s3_object_exists_task_returns_false_when_object_not_found(mock_aws_credentials: MagicMock) -> None:
-    """Test case: check s3 object exists task returns false when object not found."""
-    mock_s3_client = MagicMock()
-    mock_session = MagicMock()
-    mock_session.client.return_value = mock_s3_client
-    mock_credentials = mock_aws_credentials.load.return_value
-    mock_credentials.get_boto3_session.return_value = mock_session
-    mock_credentials.aws_client_parameters = None
-
-    not_found_error = Exception("not found")
-    not_found_error.response = {"Error": {"Code": "404"}}
-    mock_s3_client.head_object.side_effect = not_found_error
-
+def test_check_s3_object_exists_task_returns_false_when_embedding_record_not_found(tmp_path: Path) -> None:
+    """Test case: check s3 object exists task returns false when embedding record not found."""
+    sqlite_path = tmp_path / "rss_embeddings.sqlite3"
     result = rss_ingest_flow.check_s3_object_exists_task.fn(
         article_url="https://example.com/posts/1",
-        storage={"s3_bucket": "news-bucket", "s3_prefix": "rss"},
-        aws_credentials_block_name="aws-credentials-prod",
+        sqlite_path=str(sqlite_path),
     )
 
     assert result["exists"] is False
     assert result["id"] == "de0617c481337158695d4e48d5c275d2"
-    assert result["object_key"] == "rss/de/de0617c481337158695d4e48d5c275d2.json"
 
 
 @patch("flows.rss_ingest_flow.urlopen")
