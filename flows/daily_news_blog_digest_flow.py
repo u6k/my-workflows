@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import sys
@@ -467,4 +468,18 @@ def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str
 
 
 if __name__ == "__main__":
-    daily_news_blog_digest_flow()
+    parser = argparse.ArgumentParser(description="Run daily-news-blog-digest-flow.")
+    parser.add_argument(
+        "--target-date",
+        dest="target_date",
+        default=None,
+        help="Target date in YYYY-MM-DD format. If omitted, uses config.target_date or current UTC date.",
+    )
+    parser.add_argument(
+        "--config-path",
+        dest="config_path",
+        default="config.yaml",
+        help="Path to config YAML file.",
+    )
+    args = parser.parse_args()
+    daily_news_blog_digest_flow(target_date=args.target_date, config_path=args.config_path)

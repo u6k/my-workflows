@@ -90,3 +90,36 @@ python flows/rss_ingest_flow.py
 source .venv/bin/activate
 python flows/daily_news_blog_digest_flow.py
 ```
+
+### 指定日をコマンドプロンプトから手動実行で渡す
+
+`--target-date` に `YYYY-MM-DD` を渡すと、指定日で実行できます。
+
+```bash
+source .venv/bin/activate
+python flows/daily_news_blog_digest_flow.py --target-date 2026-04-02
+```
+
+必要に応じて設定ファイルも変更できます。
+
+```bash
+python flows/daily_news_blog_digest_flow.py --target-date 2026-04-02 --config-path ./config.yaml
+```
+
+### Prefect Deployment から手動実行時にパラメーターを渡す
+
+1. まず deployment を作成します（未作成の場合）。
+
+```bash
+source .venv/bin/activate
+prefect deploy flows/daily_news_blog_digest_flow.py:daily_news_blog_digest_flow -n daily-news-blog-digest-manual
+```
+
+2. コマンドで手動実行する場合は、`--params` で JSON を渡します。
+
+```bash
+prefect deployment run "daily-news-blog-digest-flow/daily-news-blog-digest-manual" \
+  --params '{"target_date":"2026-04-02"}'
+```
+
+3. Prefect UI で手動実行する場合は、**Deployments** 画面から対象 deployment を開き、**Run** を押して Parameters の `target_date` に `2026-04-02` のように入力して実行します。
