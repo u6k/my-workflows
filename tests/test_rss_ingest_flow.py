@@ -510,6 +510,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
         "rss_urls": ["https://example.com/rss.xml"],
         "retry": {"max_retries": 3},
         "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        "ollama": {"models": {"rss_ingest_flow": "qwen3.5:0.8b"}},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
             "ollama_connection_secret_block": "ollama-connection",
@@ -568,6 +569,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
         "rss_urls": ["https://example.com/rss.xml"],
         "retry": {"max_retries": 3},
         "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        "ollama": {"models": {"rss_ingest_flow": "qwen3.5:0.8b"}},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
             "ollama_connection_secret_block": "ollama-connection",
@@ -624,6 +626,7 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
         "rss_urls": ["https://example.com/rss.xml"],
         "retry": {"max_retries": 3},
         "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        "ollama": {"models": {"rss_ingest_flow": "qwen3.5:0.8b"}},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
             "ollama_connection_secret_block": "ollama-connection",
@@ -673,6 +676,7 @@ def test_rss_ingest_flow_skips_article_when_summarization_fails(
         "rss_urls": ["https://example.com/rss.xml"],
         "retry": {"max_retries": 3},
         "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        "ollama": {"models": {"rss_ingest_flow": "qwen3.5:0.8b"}},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
             "ollama_connection_secret_block": "ollama-connection",
