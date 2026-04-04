@@ -9,6 +9,7 @@ from flows import daily_news_blog_digest_flow
 
 
 def test_load_daily_digest_config_task_returns_config_when_valid(tmp_path) -> None:
+    """Test case: load daily digest config task returns config when valid."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -30,6 +31,7 @@ prefect_blocks:
 
 @patch("flows.daily_news_blog_digest_flow.AwsCredentials")
 def test_fetch_daily_articles_from_s3_task_filters_by_target_date(mock_aws_credentials: MagicMock) -> None:
+    """Test case: fetch daily articles from s3 task filters by target date."""
     mock_logger = MagicMock()
 
     mock_s3_client = MagicMock()
@@ -76,6 +78,7 @@ def test_fetch_daily_articles_from_s3_task_filters_by_target_date(mock_aws_crede
 
 
 def test_fetch_daily_articles_from_s3_task_raises_when_target_date_invalid() -> None:
+    """Test case: fetch daily articles from s3 task raises when target date invalid."""
     with pytest.raises(ValueError, match="target_date must be in YYYY-MM-DD format"):
         daily_news_blog_digest_flow.fetch_daily_articles_from_s3_task.fn(
             target_date="20260402",
@@ -85,6 +88,7 @@ def test_fetch_daily_articles_from_s3_task_raises_when_target_date_invalid() -> 
 
 
 def test_resolve_target_date_uses_config_value_when_flow_param_is_none() -> None:
+    """Test case: resolve target date uses config value when flow param is none."""
     resolved = daily_news_blog_digest_flow._resolve_target_date(
         target_date=None,
         config={"target_date": "2026-04-02"},
@@ -94,6 +98,7 @@ def test_resolve_target_date_uses_config_value_when_flow_param_is_none() -> None
 
 
 def test_resolve_target_date_defaults_to_today_when_config_missing() -> None:
+    """Test case: resolve target date defaults to today when config missing."""
     expected = datetime.now(timezone.utc).date().isoformat()
 
     resolved = daily_news_blog_digest_flow._resolve_target_date(
@@ -105,6 +110,7 @@ def test_resolve_target_date_defaults_to_today_when_config_missing() -> None:
 
 
 def test_validate_daily_digest_config_raises_when_ollama_secret_block_missing() -> None:
+    """Test case: validate daily digest config raises when ollama secret block missing."""
     with pytest.raises(
         ValueError,
         match="config.prefect_blocks.ollama_connection_secret_block must be a non-empty string",
@@ -119,6 +125,7 @@ def test_validate_daily_digest_config_raises_when_ollama_secret_block_missing() 
 
 @patch("flows.daily_news_blog_digest_flow.invoke_ollama_generate")
 def test_design_macro_themes_with_ollama_task_returns_python_object(mock_invoke_ollama_generate: MagicMock) -> None:
+    """Test case: design macro themes with ollama task returns python object."""
     mock_invoke_ollama_generate.return_value = (
         '{"taxonomy_summary":"summary","themes":[],"unclassifiable_rule":"rule"}'
     )

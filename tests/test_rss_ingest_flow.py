@@ -37,6 +37,7 @@ prefect_blocks:
 
 
 def test_load_config_task_returns_config_when_valid(tmp_path) -> None:
+    """Test case: load config task returns config when valid."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(VALID_CONFIG_YAML, encoding="utf-8")
 
@@ -49,6 +50,7 @@ def test_load_config_task_returns_config_when_valid(tmp_path) -> None:
 
 
 def test_load_config_task_raises_when_rss_urls_is_empty(tmp_path) -> None:
+    """Test case: load config task raises when rss urls is empty."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(INVALID_EMPTY_RSS_CONFIG_YAML, encoding="utf-8")
 
@@ -57,6 +59,7 @@ def test_load_config_task_raises_when_rss_urls_is_empty(tmp_path) -> None:
 
 
 def test_load_config_task_raises_when_ollama_timeout_is_invalid(tmp_path) -> None:
+    """Test case: load config task raises when ollama timeout is invalid."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
@@ -184,12 +187,14 @@ OLLAMA_GENERATE_RESPONSE = b'{"response":"summary text"}'
 
 
 def test_extract_links_from_feed_xml_supports_rss_and_deduplicates() -> None:
+    """Test case: extract links from feed xml supports rss and deduplicates."""
     links = rss_ingest_flow._extract_links_from_feed_xml(RSS_XML)
 
     assert links == ["https://example.com/a", "https://example.com/b", "https://example.com/c"]
 
 
 def test_extract_links_from_feed_xml_supports_atom() -> None:
+    """Test case: extract links from feed xml supports atom."""
     links = rss_ingest_flow._extract_links_from_feed_xml(ATOM_XML)
 
     assert links == ["https://example.com/atom-a", "https://example.com/atom-b"]
@@ -242,6 +247,7 @@ def test_fetch_feed_task_raises_when_no_entries(
 
 @patch("flows.rss_ingest_flow.trafilatura.extract")
 def test_extract_article_content_and_metadata(mock_trafilatura_extract: MagicMock) -> None:
+    """Test case: extract article content and metadata."""
     mock_trafilatura_extract.return_value = "Main content from trafilatura"
 
     extracted = rss_ingest_flow._extract_article_content_and_metadata(ARTICLE_HTML.decode("utf-8"))
@@ -259,18 +265,21 @@ def test_extract_article_content_and_metadata(mock_trafilatura_extract: MagicMoc
 
 
 def test_build_briefing_prompt_includes_article_content() -> None:
+    """Test case: build briefing prompt includes article content."""
     prompt = rss_ingest_flow._build_briefing_prompt("本文です")
     assert "本文です" in prompt
     assert "# ニュース記事" in prompt
 
 
 def test_build_one_sentence_prompt_includes_article_content() -> None:
+    """Test case: build one sentence prompt includes article content."""
     prompt = rss_ingest_flow._build_one_sentence_prompt("本文です")
     assert "本文です" in prompt
     assert "一文" in prompt
 
 
 def test_summarize_briefing_task_returns_ollama_response() -> None:
+    """Test case: summarize briefing task returns ollama response."""
     mock_logger = MagicMock()
 
     with (
@@ -291,6 +300,7 @@ def test_summarize_briefing_task_returns_ollama_response() -> None:
 
 
 def test_summarize_one_sentence_task_returns_ollama_response() -> None:
+    """Test case: summarize one sentence task returns ollama response."""
     mock_logger = MagicMock()
 
     with (
@@ -348,6 +358,7 @@ def test_extract_article_content_and_metadata_falls_back_when_trafilatura_return
 
 @patch("flows.rss_ingest_flow.AwsCredentials")
 def test_store_to_s3_task_stores_article_json_with_hashed_key(mock_aws_credentials: MagicMock) -> None:
+    """Test case: store to s3 task stores article json with hashed key."""
     mock_s3_client = MagicMock()
     mock_session = MagicMock()
     mock_session.client.return_value = mock_s3_client
@@ -371,6 +382,7 @@ def test_store_to_s3_task_stores_article_json_with_hashed_key(mock_aws_credentia
 
 
 def test_create_s3_client_parses_json_string_botocore_config() -> None:
+    """Test case: create s3 client parses json string botocore config."""
     mock_s3_client = MagicMock()
     mock_session = MagicMock()
     mock_session.client.return_value = mock_s3_client
@@ -392,6 +404,7 @@ def test_create_s3_client_parses_json_string_botocore_config() -> None:
 
 
 def test_create_s3_client_raises_when_json_string_botocore_config_is_invalid() -> None:
+    """Test case: create s3 client raises when json string botocore config is invalid."""
     mock_session = MagicMock()
     mock_aws_credentials = MagicMock()
     mock_aws_credentials.get_boto3_session.return_value = mock_session
@@ -406,6 +419,7 @@ def test_create_s3_client_raises_when_json_string_botocore_config_is_invalid() -
 
 @patch("flows.rss_ingest_flow.AwsCredentials")
 def test_check_s3_object_exists_task_returns_true_when_object_exists(mock_aws_credentials: MagicMock) -> None:
+    """Test case: check s3 object exists task returns true when object exists."""
     mock_s3_client = MagicMock()
     mock_session = MagicMock()
     mock_session.client.return_value = mock_s3_client
@@ -430,6 +444,7 @@ def test_check_s3_object_exists_task_returns_true_when_object_exists(mock_aws_cr
 
 @patch("flows.rss_ingest_flow.AwsCredentials")
 def test_check_s3_object_exists_task_returns_false_when_object_not_found(mock_aws_credentials: MagicMock) -> None:
+    """Test case: check s3 object exists task returns false when object not found."""
     mock_s3_client = MagicMock()
     mock_session = MagicMock()
     mock_session.client.return_value = mock_s3_client
@@ -454,6 +469,7 @@ def test_check_s3_object_exists_task_returns_false_when_object_not_found(mock_aw
 
 @patch("flows.rss_ingest_flow.urlopen")
 def test_fetch_article_task_raises_when_status_is_not_200(mock_urlopen: MagicMock) -> None:
+    """Test case: fetch article task raises when status is not 200."""
     mock_response = MagicMock()
     mock_response.status = 500
     mock_urlopen.return_value.__enter__.return_value = mock_response
@@ -674,6 +690,7 @@ def test_rss_ingest_flow_skips_article_when_summarization_fails(
 
 
 def test_get_task_logger_returns_standard_logger_when_prefect_context_missing() -> None:
+    """Test case: get task logger returns standard logger when prefect context missing."""
     with patch("flows.rss_ingest_flow.get_run_logger", side_effect=rss_ingest_flow.MissingContextError("missing")):
         logger = rss_ingest_flow._get_task_logger()
 
@@ -681,6 +698,7 @@ def test_get_task_logger_returns_standard_logger_when_prefect_context_missing() 
 
 
 def test_normalize_extracted_link_extracts_google_redirect_url() -> None:
+    """Test case: normalize extracted link extracts google redirect url."""
     link = "https://www.google.com/url?url=https%3A%2F%2Fexample.com%2Fdest&sa=D"
 
     normalized = rss_ingest_flow._normalize_extracted_link(link)
