@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -292,10 +293,20 @@ def _initialize_embeddings_sqlite(sqlite_path: str) -> None:
                 article_url TEXT NOT NULL,
                 model_name TEXT NOT NULL,
                 embedding_json TEXT NOT NULL,
-                source_text TEXT NOT NULL
+                source_text TEXT NOT NULL,
+                article_published_timestamp TEXT,
+                embedding_created_at_utc TEXT
             )
             """
         )
+        existing_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(article_embeddings)")
+        }
+        if "article_published_timestamp" not in existing_columns:
+            conn.execute("ALTER TABLE article_embeddings ADD COLUMN article_published_timestamp TEXT")
+        if "embedding_created_at_utc" not in existing_columns:
+            conn.execute("ALTER TABLE article_embeddings ADD COLUMN embedding_created_at_utc TEXT")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_article_embeddings_model
@@ -794,16 +805,33 @@ def upsert_briefing_embedding_to_sqlite_task(
         logger=logger,
     )
     _initialize_embeddings_sqlite(sqlite_path)
+    published_timestamp = article.get("published_timestamp")
+    if not isinstance(published_timestamp, str):
+        metadata = article.get("metadata")
+        if isinstance(metadata, dict):
+            meta_published_timestamp = metadata.get("published_timestamp")
+            if isinstance(meta_published_timestamp, str):
+                published_timestamp = meta_published_timestamp
+            else:
+                published_timestamp = None
+        else:
+            published_timestamp = None
+    created_at_utc = datetime.now(timezone.utc).isoformat()
+
     with sqlite3.connect(sqlite_path) as conn:
         conn.execute(
             """
-            INSERT INTO article_embeddings(article_id, article_url, model_name, embedding_json, source_text)
-            VALUES(?, ?, ?, ?, ?)
+            INSERT INTO article_embeddings(
+                article_id, article_url, model_name, embedding_json, source_text, article_published_timestamp, embedding_created_at_utc
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(article_id) DO UPDATE SET
                 article_url=excluded.article_url,
                 model_name=excluded.model_name,
                 embedding_json=excluded.embedding_json,
-                source_text=excluded.source_text
+                source_text=excluded.source_text,
+                article_published_timestamp=excluded.article_published_timestamp,
+                embedding_created_at_utc=excluded.embedding_created_at_utc
             """,
             (
                 str(article["id"]),
@@ -811,6 +839,8 @@ def upsert_briefing_embedding_to_sqlite_task(
                 embedding_connection["model"],
                 json.dumps(embedding),
                 briefing_summary,
+                published_timestamp,
+                created_at_utc,
             ),
         )
         conn.commit()
