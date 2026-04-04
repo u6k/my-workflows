@@ -153,3 +153,58 @@ def test_design_macro_themes_with_ollama_task_returns_python_object(mock_invoke_
         "design_macro_themes_with_ollama_task result: %s",
         {"taxonomy_summary": "summary", "themes": [], "unclassifiable_rule": "rule"},
     )
+
+
+@patch("flows.daily_news_blog_digest_flow.invoke_ollama_generate")
+def test_assign_articles_to_themes_with_ollama_task_returns_assignments(mock_invoke_ollama_generate: MagicMock) -> None:
+    """Test case: assign articles to themes with ollama task returns assignments."""
+    mock_invoke_ollama_generate.return_value = """
+{
+  "assignments": [
+    {"article_index": 0, "theme_id": "T01", "confidence": 0.95, "reason": "policy news"},
+    {"article_index": 1, "theme_id": "UNCLASSIFIABLE", "confidence": 0.40, "reason": "edge case"}
+  ]
+}
+""".strip()
+
+    result = daily_news_blog_digest_flow.assign_articles_to_themes_with_ollama_task.fn(
+        articles=[
+            {"id": "a", "title": "A", "one_sentence_summary": "A summary"},
+            {"id": "b", "title": "B", "one_sentence_summary": "B summary"},
+        ],
+        taxonomy={
+            "themes": [
+                {"theme_id": "T01", "theme_name": "Politics"},
+                {"theme_id": "T02", "theme_name": "Markets"},
+            ]
+        },
+        ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+        timeout_sec=60,
+    )
+
+    assert result == [
+        {"article_index": 0, "theme_id": "T01", "confidence": 0.95, "reason": "policy news"},
+        {"article_index": 1, "theme_id": "UNCLASSIFIABLE", "confidence": 0.40, "reason": "edge case"},
+    ]
+
+
+@patch("flows.daily_news_blog_digest_flow.invoke_ollama_generate")
+def test_assign_articles_to_themes_with_ollama_task_raises_when_unknown_theme_id(
+    mock_invoke_ollama_generate: MagicMock,
+) -> None:
+    """Test case: assign articles to themes with ollama task raises when unknown theme id."""
+    mock_invoke_ollama_generate.return_value = """
+{
+  "assignments": [
+    {"article_index": 0, "theme_id": "T99", "confidence": 0.8, "reason": "unknown"}
+  ]
+}
+""".strip()
+
+    with pytest.raises(ValueError, match="assignment.theme_id is not in taxonomy"):
+        daily_news_blog_digest_flow.assign_articles_to_themes_with_ollama_task.fn(
+            articles=[{"id": "a", "title": "A", "one_sentence_summary": "A summary"}],
+            taxonomy={"themes": [{"theme_id": "T01"}]},
+            ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+            timeout_sec=60,
+        )

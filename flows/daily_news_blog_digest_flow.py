@@ -257,6 +257,84 @@ def _build_macro_theme_prompt(articles: list[dict[str, str]]) -> str:
 """
 
 
+def _build_article_assignment_prompt(
+    articles: list[dict[str, Any]],
+    taxonomy: dict[str, Any],
+) -> str:
+    """記事群とテーマ体系から記事割当プロンプトを構築する。
+
+    処理内容:
+        記事を割当用に圧縮し、taxonomyと合わせてLLMへ渡すJSONプロンプトを作成する。
+    入力:
+        articles: 元記事配列（id/title/one_sentence_summary などを含む）。
+        taxonomy: `themes` を含むテーマ体系辞書。
+    出力:
+        str: 記事割当用プロンプト文字列。
+    例外:
+        なし。
+    外部依存リソース:
+        なし。
+    """
+    compact_articles = [
+        {
+            "article_index": index,
+            "id": article.get("id"),
+            "title": article["title"],
+            "one_sentence_summary": article["one_sentence_summary"],
+        }
+        for index, article in enumerate(articles)
+        if isinstance(article.get("title"), str)
+        and article["title"]
+        and isinstance(article.get("one_sentence_summary"), str)
+        and article["one_sentence_summary"]
+    ]
+    articles_json = json.dumps(compact_articles, ensure_ascii=False, indent=2)
+    taxonomy_json = json.dumps(taxonomy, ensure_ascii=False, indent=2)
+    return f"""あなたはニュース記事の分類担当者です。渡された taxonomy に従って、各記事を1つのテーマへ割り当ててください。
+
+# 制約
+- 各記事は必ず1つの theme_id に割り当てる
+- taxonomy にない theme_id は使わない
+- どうしても分類不能なら "UNCLASSIFIABLE" を使う
+- confidence は 0.0 〜 1.0 の実数
+- 出力はJSONのみ
+
+# 入力 taxonomy
+{taxonomy_json}
+
+# 入力記事
+{articles_json}
+
+# タスク
+1. 各記事について最も適切な theme_id を選ぶ
+2. 1行理由（reason）を付ける
+3. 信頼度（confidence）を 0.0〜1.0 で付ける
+
+# 出力JSONスキーマ
+{{
+  "assignments": [
+    {{
+      "article_index": 0,
+      "theme_id": "T01",
+      "confidence": 0.87,
+      "reason": "string"
+    }}
+  ]
+}}
+"""
+
+
+def _validate_theme_ids(taxonomy: dict[str, Any]) -> set[str]:
+    """テーマ体系から利用可能なテーマID集合を抽出する。"""
+    themes = taxonomy.get("themes")
+    if not isinstance(themes, list):
+        raise ValueError("taxonomy.themes must be a list")
+    theme_ids = {theme.get("theme_id") for theme in themes if isinstance(theme, dict) and isinstance(theme.get("theme_id"), str)}
+    if not theme_ids:
+        raise ValueError("taxonomy.themes must include at least one theme_id")
+    return theme_ids
+
+
 @task(name="load_daily_digest_config_task")
 def load_daily_digest_config_task(config_path: str = "config.yaml") -> dict[str, Any]:
     """日次ダイジェスト設定を読み込み、検証済みで返す。
@@ -426,6 +504,89 @@ def design_macro_themes_with_ollama_task(
     return taxonomy
 
 
+@task(name="assign_articles_to_themes_with_ollama_task")
+def assign_articles_to_themes_with_ollama_task(
+    articles: list[dict[str, Any]],
+    taxonomy: dict[str, Any],
+    ollama_connection: dict[str, str],
+    timeout_sec: int = 120,
+) -> list[dict[str, Any]]:
+    """テーマ体系にもとづき記事を単一テーマへ割り当てる。
+
+    処理内容:
+        taxonomy から有効な theme_id を抽出し、記事群をLLM分類して
+        `article_index/theme_id/confidence/reason` 配列を返す。
+    入力:
+        articles: 記事配列。
+        taxonomy: `design_macro_themes_with_ollama_task` の出力。
+        ollama_connection: Ollama接続設定（base_url/model）。
+        timeout_sec: API呼び出しタイムアウト秒。
+    出力:
+        list[dict[str, Any]]: 記事割当配列。
+    例外:
+        ValueError: taxonomy不正、応答不正、割当不備の場合。
+        JSONDecodeError: Ollama応答のJSON解析失敗時。
+    外部依存リソース:
+        Ollama HTTP API。
+    """
+    logger = _get_task_logger()
+    theme_ids = _validate_theme_ids(taxonomy)
+
+    compact_articles = [
+        article
+        for article in articles
+        if isinstance(article.get("title"), str)
+        and article["title"]
+        and isinstance(article.get("one_sentence_summary"), str)
+        and article["one_sentence_summary"]
+    ]
+    if not compact_articles:
+        raise ValueError("articles must include at least one valid title and one_sentence_summary pair")
+
+    prompt = _build_article_assignment_prompt(compact_articles, taxonomy)
+    raw_response = invoke_ollama_generate(
+        ollama_connection=ollama_connection,
+        prompt=prompt,
+        timeout_sec=timeout_sec,
+        response_format="json",
+        logger=logger,
+    )
+    if not raw_response:
+        raise ValueError("Ollama response does not contain assignment JSON text")
+
+    response_data = json.loads(raw_response)
+    assignments = response_data.get("assignments") if isinstance(response_data, dict) else None
+    if not isinstance(assignments, list):
+        raise ValueError("assignment response must include assignments list")
+
+    normalized_assignments: list[dict[str, Any]] = []
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            raise ValueError("assignment item must be an object")
+        article_index = assignment.get("article_index")
+        theme_id = assignment.get("theme_id")
+        if not isinstance(article_index, int):
+            raise ValueError("assignment.article_index must be an integer")
+        if not isinstance(theme_id, str) or not theme_id:
+            raise ValueError("assignment.theme_id must be a non-empty string")
+        if theme_id not in theme_ids and theme_id != "UNCLASSIFIABLE":
+            raise ValueError(f"assignment.theme_id is not in taxonomy: {theme_id}")
+        normalized_assignments.append(
+            {
+                "article_index": article_index,
+                "theme_id": theme_id,
+                "confidence": assignment.get("confidence"),
+                "reason": assignment.get("reason"),
+            }
+        )
+
+    if len(normalized_assignments) != len(compact_articles):
+        raise ValueError("assignment count must match compact article count")
+
+    logger.info("assign_articles_to_themes_with_ollama_task result_count=%d", len(normalized_assignments))
+    return normalized_assignments
+
+
 @flow(name="daily-news-blog-digest-flow")
 def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str = "config.yaml") -> dict[str, Any]:
     """指定日の記事からマクロテーマ体系を生成するメインフロー。
@@ -460,11 +621,21 @@ def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str
         config["ollama"]["models"]["daily_news_blog_digest_flow"],
     )
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
-    return design_macro_themes_with_ollama_task(
+    taxonomy = design_macro_themes_with_ollama_task(
         articles=articles,
         ollama_connection=ollama_connection,
         timeout_sec=ollama_timeout_sec,
     )
+    assignments = assign_articles_to_themes_with_ollama_task(
+        articles=articles,
+        taxonomy=taxonomy,
+        ollama_connection=ollama_connection,
+        timeout_sec=ollama_timeout_sec,
+    )
+    return {
+        "taxonomy": taxonomy,
+        "article_assignments": assignments,
+    }
 
 
 if __name__ == "__main__":
