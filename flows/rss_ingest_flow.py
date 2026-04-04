@@ -925,8 +925,10 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
     ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
-    ollama_connection = build_ollama_connection(ollama_secret, config["ollama"]["models"]["rss_ingest_flow"])
-    embedding_connection = build_ollama_connection(ollama_secret, config["ollama"]["models"]["rss_ingest_flow_embedding"])
+    models = config["ollama"]["models"]
+    ollama_connection = build_ollama_connection(ollama_secret, models["rss_ingest_flow"])
+    embedding_model = models.get("rss_ingest_flow_embedding", models["rss_ingest_flow"])
+    embedding_connection = build_ollama_connection(ollama_secret, embedding_model)
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
     sqlite_path = config.get("embeddings", {}).get("sqlite_path", ".data/rss_embeddings.sqlite3")
     _initialize_embeddings_sqlite(sqlite_path)
