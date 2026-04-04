@@ -341,9 +341,12 @@ def test_upsert_briefing_embedding_to_sqlite_task_stores_embedding(mock_invoke_o
         article={
             "id": "article-1",
             "url": "https://example.com/a",
+            "title": "Article title",
             "briefing_summary": "summary text",
             "one_sentence_summary": "one sentence",
             "published_timestamp": "2026-04-04T00:00:00+00:00",
+            "fetch_timestamp": "2026-04-04T01:00:00+00:00",
+            "metadata": {"source_feed_url": "https://example.com/rss.xml"},
         },
         embedding_connection={"base_url": "http://localhost:11434", "model": "nomic-embed-text"},
         sqlite_path=str(sqlite_path),
@@ -355,7 +358,7 @@ def test_upsert_briefing_embedding_to_sqlite_task_stores_embedding(mock_invoke_o
     with sqlite3.connect(sqlite_path) as conn:
         row = conn.execute(
             """
-            SELECT article_id, article_url, model_name, embedding_json, briefing_summary, one_sentence_summary, article_published_timestamp, embedding_created_at_utc
+            SELECT article_id, article_url, title, published_timestamp, fetch_timestamp, briefing_summary, one_sentence_summary, metadata_json, embedding_json, embedding_timestamp
             FROM article_embeddings
             WHERE article_id=?
             """,
@@ -365,11 +368,14 @@ def test_upsert_briefing_embedding_to_sqlite_task_stores_embedding(mock_invoke_o
     assert row is not None
     assert row[0] == "article-1"
     assert row[1] == "https://example.com/a"
-    assert row[2] == "nomic-embed-text"
-    assert row[4] == "summary text"
-    assert row[5] == "one sentence"
-    assert row[6] == "2026-04-04T00:00:00+00:00"
-    assert isinstance(row[7], str) and row[7] != ""
+    assert row[2] == "Article title"
+    assert row[3] == "2026-04-04T00:00:00+00:00"
+    assert row[4] == "2026-04-04T01:00:00+00:00"
+    assert row[5] == "summary text"
+    assert row[6] == "one sentence"
+    assert row[7] == '{"source_feed_url": "https://example.com/rss.xml"}'
+    assert row[8] == "[0.1, 0.2, 0.3]"
+    assert isinstance(row[9], str) and row[9] != ""
 
 
 @patch("flows.rss_ingest_flow.trafilatura.extract")

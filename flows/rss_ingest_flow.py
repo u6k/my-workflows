@@ -291,31 +291,21 @@ def _initialize_embeddings_sqlite(sqlite_path: str) -> None:
             CREATE TABLE IF NOT EXISTS article_embeddings (
                 article_id TEXT PRIMARY KEY,
                 article_url TEXT NOT NULL,
-                model_name TEXT NOT NULL,
-                embedding_json TEXT NOT NULL,
+                title TEXT,
+                published_timestamp TEXT,
+                fetch_timestamp TEXT,
                 briefing_summary TEXT,
                 one_sentence_summary TEXT,
-                article_published_timestamp TEXT,
-                embedding_created_at_utc TEXT
+                metadata_json TEXT,
+                embedding_json TEXT NOT NULL,
+                embedding_timestamp TEXT NOT NULL
             )
             """
         )
-        existing_columns = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(article_embeddings)")
-        }
-        if "article_published_timestamp" not in existing_columns:
-            conn.execute("ALTER TABLE article_embeddings ADD COLUMN article_published_timestamp TEXT")
-        if "embedding_created_at_utc" not in existing_columns:
-            conn.execute("ALTER TABLE article_embeddings ADD COLUMN embedding_created_at_utc TEXT")
-        if "briefing_summary" not in existing_columns:
-            conn.execute("ALTER TABLE article_embeddings ADD COLUMN briefing_summary TEXT")
-        if "one_sentence_summary" not in existing_columns:
-            conn.execute("ALTER TABLE article_embeddings ADD COLUMN one_sentence_summary TEXT")
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_article_embeddings_model
-            ON article_embeddings(model_name)
+            ON article_embeddings(article_url)
             """
         )
         conn.commit()
@@ -653,6 +643,10 @@ def fetch_article_task(article_url: str) -> dict[str, Any]:
     extracted["url"] = article_url
     extracted["id"] = _url_to_md5(article_url)
     extracted["raw_html"] = article_html
+    extracted["fetch_timestamp"] = datetime.now(timezone.utc).isoformat()
+    metadata_published_timestamp = extracted.get("metadata", {}).get("published_timestamp")
+    if isinstance(metadata_published_timestamp, str):
+        extracted["published_timestamp"] = metadata_published_timestamp
     return extracted
 
 
@@ -812,45 +806,48 @@ def upsert_briefing_embedding_to_sqlite_task(
     _initialize_embeddings_sqlite(sqlite_path)
     published_timestamp = article.get("published_timestamp")
     if not isinstance(published_timestamp, str):
-        metadata = article.get("metadata")
-        if isinstance(metadata, dict):
-            meta_published_timestamp = metadata.get("published_timestamp")
-            if isinstance(meta_published_timestamp, str):
-                published_timestamp = meta_published_timestamp
-            else:
-                published_timestamp = None
-        else:
-            published_timestamp = None
-    created_at_utc = datetime.now(timezone.utc).isoformat()
+        published_timestamp = None
+    fetch_timestamp = article.get("fetch_timestamp")
+    if not isinstance(fetch_timestamp, str):
+        fetch_timestamp = datetime.now(timezone.utc).isoformat()
+    embedding_timestamp = datetime.now(timezone.utc).isoformat()
     one_sentence_summary = article.get("one_sentence_summary")
     if not isinstance(one_sentence_summary, str):
         one_sentence_summary = None
+    metadata = article.get("metadata")
+    metadata_json = json.dumps(metadata if isinstance(metadata, dict) else {}, ensure_ascii=False)
+    article["embedding_json"] = embedding
+    article["embedding_timestamp"] = embedding_timestamp
 
     with sqlite3.connect(sqlite_path) as conn:
         conn.execute(
             """
             INSERT INTO article_embeddings(
-                article_id, article_url, model_name, embedding_json, briefing_summary, one_sentence_summary, article_published_timestamp, embedding_created_at_utc
+                article_id, article_url, title, published_timestamp, fetch_timestamp, briefing_summary, one_sentence_summary, metadata_json, embedding_json, embedding_timestamp
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(article_id) DO UPDATE SET
                 article_url=excluded.article_url,
-                model_name=excluded.model_name,
+                title=excluded.title,
+                published_timestamp=excluded.published_timestamp,
+                fetch_timestamp=excluded.fetch_timestamp,
                 embedding_json=excluded.embedding_json,
                 briefing_summary=excluded.briefing_summary,
                 one_sentence_summary=excluded.one_sentence_summary,
-                article_published_timestamp=excluded.article_published_timestamp,
-                embedding_created_at_utc=excluded.embedding_created_at_utc
+                metadata_json=excluded.metadata_json,
+                embedding_timestamp=excluded.embedding_timestamp
             """,
             (
                 str(article["id"]),
                 str(article["url"]),
-                embedding_connection["model"],
-                json.dumps(embedding),
+                article.get("title"),
+                published_timestamp,
+                fetch_timestamp,
                 briefing_summary,
                 one_sentence_summary,
-                published_timestamp,
-                created_at_utc,
+                metadata_json,
+                json.dumps(embedding),
+                embedding_timestamp,
             ),
         )
         conn.commit()
