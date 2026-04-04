@@ -973,12 +973,13 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
                 ollama_connection=ollama_connection,
                 timeout_sec=ollama_timeout_sec,
             )
-            upsert_briefing_embedding_to_sqlite_task(
-                article=article,
-                embedding_connection=embedding_connection,
-                sqlite_path=sqlite_path,
-                timeout_sec=ollama_timeout_sec,
-            )
+            if isinstance(article.get("briefing_summary"), str) and article["briefing_summary"]:
+                upsert_briefing_embedding_to_sqlite_task(
+                    article=article,
+                    embedding_connection=embedding_connection,
+                    sqlite_path=sqlite_path,
+                    timeout_sec=ollama_timeout_sec,
+                )
         except Exception as exc:
             logger.warning("article fetch/summarize skipped: url=%s reason=%s", link, exc)
             continue
