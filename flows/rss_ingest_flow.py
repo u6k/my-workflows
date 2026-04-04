@@ -731,6 +731,32 @@ def check_s3_object_exists_task(article_url: str, storage: dict[str, Any], aws_c
         raise
 
 
+@task(name="check_embedding_record_exists_task")
+def check_embedding_record_exists_task(article_url: str, sqlite_path: str) -> dict[str, Any]:
+    """記事URL対応のSQLite埋め込みレコード存在有無を確認する。
+
+    処理内容:
+        URLをID化して `article_embeddings` から存在確認し、存在有無を返す。
+    入力:
+        article_url: 記事URL。
+        sqlite_path: 埋め込み保存先SQLiteファイルパス。
+    出力:
+        dict[str, Any]: `exists` / `id` を含む辞書。
+    例外:
+        sqlite3.Error: DBアクセス失敗時。
+    外部依存リソース:
+        ローカルSQLiteファイル。
+    """
+    article_id = _url_to_md5(article_url)
+    _initialize_embeddings_sqlite(sqlite_path)
+    with sqlite3.connect(sqlite_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM article_embeddings WHERE article_id=? LIMIT 1",
+            (article_id,),
+        ).fetchone()
+    return {"exists": row is not None, "id": article_id}
+
+
 @task(name="summarize_briefing_task")
 def summarize_briefing_task(article_content: str, ollama_connection: dict[str, str], timeout_sec: int = 120) -> str:
     """記事本文を詳細ブリーフィング形式で要約する。
@@ -1021,18 +1047,12 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     stored_count = 0
     skipped_existing_count = 0
     for link in unique_links:
-        s3_lookup = check_s3_object_exists_task(
-            article_url=link,
-            storage=config["storage"],
-            aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
-        )
-        if s3_lookup["exists"]:
+        embedding_lookup = check_embedding_record_exists_task(article_url=link, sqlite_path=sqlite_path)
+        if embedding_lookup["exists"]:
             logger.info(
-                "article already exists in s3, skip fetch/summarize: id=%s url=%s s3://%s/%s",
-                s3_lookup["id"],
+                "article already exists in sqlite embeddings, skip fetch/summarize: id=%s url=%s",
+                embedding_lookup["id"],
                 link,
-                config["storage"]["s3_bucket"],
-                s3_lookup["object_key"],
             )
             skipped_existing_count += 1
             continue
@@ -1043,13 +1063,6 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
                 ollama_connection=ollama_connection,
                 timeout_sec=ollama_timeout_sec,
             )
-            if isinstance(article.get("briefing_summary"), str) and article["briefing_summary"]:
-                upsert_briefing_embedding_to_sqlite_task(
-                    article=article,
-                    embedding_connection=embedding_connection,
-                    sqlite_path=sqlite_path,
-                    timeout_sec=ollama_timeout_sec,
-                )
         except Exception as exc:
             logger.warning("article fetch/summarize skipped: url=%s reason=%s", link, exc)
             continue
@@ -1072,10 +1085,20 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
         )
         article_count += 1
         stored_count += 1
+        if isinstance(article.get("briefing_summary"), str) and article["briefing_summary"]:
+            try:
+                upsert_briefing_embedding_to_sqlite_task(
+                    article=article,
+                    embedding_connection=embedding_connection,
+                    sqlite_path=sqlite_path,
+                    timeout_sec=ollama_timeout_sec,
+                )
+            except Exception as exc:
+                logger.warning("embedding upsert skipped: id=%s url=%s reason=%s", article.get("id"), article.get("url"), exc)
 
     logger.info("article fetching completed: total=%d", article_count)
     logger.info("article storing completed: total=%d", stored_count)
-    logger.info("article skipped by existing s3 object: total=%d", skipped_existing_count)
+    logger.info("article skipped by existing sqlite embedding record: total=%d", skipped_existing_count)
 
 
 @flow(name="fetch_summarize_url_flow")
