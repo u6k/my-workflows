@@ -293,7 +293,6 @@ def _initialize_embeddings_sqlite(sqlite_path: str) -> None:
                 article_url TEXT NOT NULL,
                 model_name TEXT NOT NULL,
                 embedding_json TEXT NOT NULL,
-                source_text TEXT NOT NULL,
                 briefing_summary TEXT,
                 one_sentence_summary TEXT,
                 article_published_timestamp TEXT,
@@ -831,14 +830,13 @@ def upsert_briefing_embedding_to_sqlite_task(
         conn.execute(
             """
             INSERT INTO article_embeddings(
-                article_id, article_url, model_name, embedding_json, source_text, briefing_summary, one_sentence_summary, article_published_timestamp, embedding_created_at_utc
+                article_id, article_url, model_name, embedding_json, briefing_summary, one_sentence_summary, article_published_timestamp, embedding_created_at_utc
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(article_id) DO UPDATE SET
                 article_url=excluded.article_url,
                 model_name=excluded.model_name,
                 embedding_json=excluded.embedding_json,
-                source_text=excluded.source_text,
                 briefing_summary=excluded.briefing_summary,
                 one_sentence_summary=excluded.one_sentence_summary,
                 article_published_timestamp=excluded.article_published_timestamp,
@@ -849,7 +847,6 @@ def upsert_briefing_embedding_to_sqlite_task(
                 str(article["url"]),
                 embedding_connection["model"],
                 json.dumps(embedding),
-                briefing_summary,
                 briefing_summary,
                 one_sentence_summary,
                 published_timestamp,
