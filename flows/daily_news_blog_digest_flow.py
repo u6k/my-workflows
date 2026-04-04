@@ -287,6 +287,7 @@ def _build_single_article_assignment_prompt(
     }
     article_json = json.dumps(compact_article, ensure_ascii=False, indent=2)
     taxonomy_json = json.dumps(taxonomy, ensure_ascii=False, indent=2)
+    article_index = compact_article["article_index"]
     return f"""あなたはニュース記事の分類担当者です。渡された taxonomy に従って、記事を1つのテーマへ割り当ててください。
 
 # 制約
@@ -309,7 +310,7 @@ def _build_single_article_assignment_prompt(
 
 # 出力JSONスキーマ
 {{
-  "article_index": 0,
+  "article_index": {article_index},
   "theme_id": "T01",
   "confidence": 0.87,
   "reason": "string"
@@ -568,10 +569,21 @@ def assign_articles_to_themes_with_ollama_task(
             raise ValueError("assignment response must be a JSON object")
         article_index = assignment.get("article_index")
         theme_id = assignment.get("theme_id")
+        requested_article_index = article["article_index"]
         if not isinstance(article_index, int):
-            raise ValueError("assignment.article_index must be an integer")
-        if article_index != article["article_index"]:
-            raise ValueError("assignment.article_index does not match requested article")
+            logger.warning(
+                "assignment.article_index is invalid; fallback to requested index: requested=%s raw=%s",
+                requested_article_index,
+                article_index,
+            )
+            article_index = requested_article_index
+        elif article_index != requested_article_index:
+            logger.warning(
+                "assignment.article_index mismatch; fallback to requested index: requested=%s returned=%s",
+                requested_article_index,
+                article_index,
+            )
+            article_index = requested_article_index
         if not isinstance(theme_id, str) or not theme_id:
             raise ValueError("assignment.theme_id must be a non-empty string")
         if theme_id not in theme_ids and theme_id != "UNCLASSIFIABLE":
