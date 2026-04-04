@@ -18,6 +18,20 @@ REQUIRED_OLLAMA_CONNECTION_KEYS = (
 
 
 def load_yaml_config(config_path: str) -> dict[str, Any]:
+    """YAML設定ファイルを読み込み、辞書形式の設定として返す。
+
+    処理内容:
+        指定パスの存在確認を行い、UTF-8で読み込んだ内容を `yaml.safe_load` で
+        パースし、トップレベルが辞書であることを検証する。
+    入力:
+        config_path: YAMLファイルパス。
+    出力:
+        dict[str, Any]: 読み込まれた設定辞書。
+    例外:
+        ValueError: ファイルが存在しない、またはトップレベルが辞書でない場合。
+    外部依存リソース:
+        ローカルファイルシステム。
+    """
     path = Path(config_path)
     if not path.exists():
         raise ValueError(f"config file is not found: {config_path}")
@@ -32,6 +46,20 @@ def load_yaml_config(config_path: str) -> dict[str, Any]:
 
 
 def normalize_botocore_config(raw_config: Any) -> BotocoreConfig | None:
+    """S3クライアント設定値を `botocore.config.Config` に正規化する。
+
+    処理内容:
+        None / Config / dict / JSON文字列を受け取り、JSON文字列は辞書へ変換したうえで
+        `BotocoreConfig` を生成する。空文字は未指定として `None` を返す。
+    入力:
+        raw_config: 生の設定値。
+    出力:
+        BotocoreConfig | None: 正規化済み設定、または未指定時の None。
+    例外:
+        ValueError: JSON不正、または許容型以外の値が渡された場合。
+    外部依存リソース:
+        なし。
+    """
     if raw_config is None:
         return None
 
@@ -55,6 +83,20 @@ def normalize_botocore_config(raw_config: Any) -> BotocoreConfig | None:
 
 
 def get_aws_client_parameters(aws_credentials: AwsCredentials) -> dict[str, Any]:
+    """AwsCredentials から boto3 client 用の上書きパラメータを抽出する。
+
+    処理内容:
+        `aws_client_parameters` を参照し、`get_params_override` があれば優先利用する。
+        利用できない場合は dict または属性から `endpoint_url` と `config` を抽出する。
+    入力:
+        aws_credentials: Prefect の AwsCredentials ブロックインスタンス。
+    出力:
+        dict[str, Any]: boto3 `client()` に渡せる上書き引数。
+    例外:
+        なし。
+    外部依存リソース:
+        Prefectブロックオブジェクト属性。
+    """
     aws_client_parameters = getattr(aws_credentials, "aws_client_parameters", None)
     if aws_client_parameters is None:
         return {}
@@ -80,6 +122,20 @@ def get_aws_client_parameters(aws_credentials: AwsCredentials) -> dict[str, Any]
 
 
 def create_s3_client(aws_credentials: AwsCredentials) -> Any:
+    """AwsCredentials の情報を使って設定済み S3 クライアントを作成する。
+
+    処理内容:
+        AWSクライアント上書きパラメータを取得し、`endpoint_url` と `config` を反映して
+        boto3 session の `client("s3")` を生成する。
+    入力:
+        aws_credentials: Prefect の AwsCredentials ブロックインスタンス。
+    出力:
+        Any: boto3 S3クライアント。
+    例外:
+        ValueError: `config` の正規化に失敗した場合。
+    外部依存リソース:
+        Prefectブロック、AWS SDK（boto3/botocore）。
+    """
     client_kwargs: dict[str, Any] = {}
     client_parameters = get_aws_client_parameters(aws_credentials)
 
@@ -95,6 +151,20 @@ def create_s3_client(aws_credentials: AwsCredentials) -> Any:
 
 
 def validate_ollama_connection(ollama_connection: Any) -> dict[str, str]:
+    """Ollama接続情報の必須キーを検証して利用可能な辞書を返す。
+
+    処理内容:
+        入力が辞書であることを確認し、`base_url` と `model` が非空文字列として
+        含まれているかを検証して必要キーのみ返す。
+    入力:
+        ollama_connection: Secretから取得した接続情報オブジェクト。
+    出力:
+        dict[str, str]: `base_url` と `model` を含む接続辞書。
+    例外:
+        ValueError: 辞書でない、または必須キーが不足/不正な場合。
+    外部依存リソース:
+        なし。
+    """
     if not isinstance(ollama_connection, dict):
         raise ValueError("Ollama Secret block value must be a dict")
 
@@ -111,6 +181,21 @@ def validate_ollama_connection(ollama_connection: Any) -> dict[str, str]:
 
 
 def load_ollama_connection_secret(secret_block_name: str, logger: logging.Logger | None = None) -> dict[str, str]:
+    """Prefect SecretブロックからOllama接続情報を読み出して検証する。
+
+    処理内容:
+        指定名の Secret ブロックをロードして値を取得し、必要キーを検証したうえで
+        接続辞書として返す。ロガーが指定されていれば読み込みログを出力する。
+    入力:
+        secret_block_name: Secretブロック名。
+        logger: 任意のロガー。
+    出力:
+        dict[str, str]: 検証済みOllama接続辞書。
+    例外:
+        ValueError: Secret値の形式が不正な場合。
+    外部依存リソース:
+        Prefect Secretブロックストレージ。
+    """
     ollama_secret_value = Secret.load(secret_block_name).get()
     if logger is not None:
         logger.info("Prefect secret loaded: key=ollama_connection_secret_block name=%s", secret_block_name)
@@ -124,6 +209,25 @@ def invoke_ollama_generate(
     response_format: str | None = None,
     logger: logging.Logger | None = None,
 ) -> str:
+    """Ollama の `/api/generate` を呼び出して生成テキストを返す。
+
+    処理内容:
+        モデル名・プロンプト・フォーマットからJSONペイロードを作成し、HTTP POSTで
+        Ollamaへ送信する。レスポンス本文をJSONとして解析し、`response` を抽出する。
+    入力:
+        ollama_connection: `base_url` と `model` を含む接続設定。
+        prompt: 生成プロンプト文字列。
+        timeout_sec: HTTPタイムアウト秒。
+        response_format: Ollamaの `format` パラメータ（例: `"json"`）。
+        logger: 任意ロガー。
+    出力:
+        str: 生成されたテキスト（前後空白除去済み）。
+    例外:
+        URLError/HTTPError: 通信失敗やHTTPエラー時。
+        JSONDecodeError: レスポンスJSONの解析に失敗した場合。
+    外部依存リソース:
+        Ollama HTTP API。
+    """
     if logger is not None:
         logger.info("ollama prompt: %s", prompt)
 

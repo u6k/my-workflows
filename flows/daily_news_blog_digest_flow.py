@@ -19,6 +19,20 @@ else:
 
 
 def _get_task_logger() -> logging.Logger:
+    """Prefect実行コンテキストに応じたロガーを返す。
+
+    処理内容:
+        実行中のPrefectランコンテキストがある場合は `get_run_logger` を返し、
+        無い場合はモジュールロガーを返す。
+    入力:
+        なし。
+    出力:
+        logging.Logger: 利用可能なロガー。
+    例外:
+        なし（`MissingContextError` は内部で吸収）。
+    外部依存リソース:
+        Prefect実行コンテキスト。
+    """
     try:
         return get_run_logger()
     except MissingContextError:
@@ -26,10 +40,36 @@ def _get_task_logger() -> logging.Logger:
 
 
 def _load_yaml_config(config_path: str) -> dict[str, Any]:
+    """共通ユーティリティ経由でYAML設定を読み込む。
+
+    処理内容:
+        `flows.common.load_yaml_config` を呼び出して設定辞書を取得する。
+    入力:
+        config_path: YAML設定ファイルパス。
+    出力:
+        dict[str, Any]: 設定辞書。
+    例外:
+        ValueError: 設定ファイル不備時。
+    外部依存リソース:
+        ローカルファイルシステム。
+    """
     return load_yaml_config(config_path)
 
 
 def _validate_daily_digest_config(config: dict[str, Any]) -> None:
+    """日次ダイジェストフロー設定の妥当性を検証する。
+
+    処理内容:
+        storage / prefect_blocks / ollama 配下の必須キー、型、空文字、数値範囲を検証する。
+    入力:
+        config: 検証対象の設定辞書。
+    出力:
+        なし。
+    例外:
+        ValueError: 必須キー不足、型不正、値不正の場合。
+    外部依存リソース:
+        なし。
+    """
     storage = config.get("storage")
     if not isinstance(storage, dict):
         raise ValueError("config.storage must be an object")
@@ -65,6 +105,19 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
 
 
 def _parse_target_date(target_date: str) -> date:
+    """`YYYY-MM-DD` 形式の日付文字列を `date` に変換する。
+
+    処理内容:
+        `datetime.strptime` で文字列を日付へ変換し、日付オブジェクトを返す。
+    入力:
+        target_date: `YYYY-MM-DD` 形式の文字列。
+    出力:
+        date: 変換された日付。
+    例外:
+        ValueError: 日付形式が不正な場合。
+    外部依存リソース:
+        なし。
+    """
     try:
         return datetime.strptime(target_date, "%Y-%m-%d").date()
     except ValueError as exc:
@@ -72,6 +125,21 @@ def _parse_target_date(target_date: str) -> date:
 
 
 def _resolve_target_date(target_date: str | None, config: dict[str, Any]) -> str:
+    """実行対象日を引数・設定・現在日付から解決して返す。
+
+    処理内容:
+        優先順位を「引数 > config.target_date > UTC当日」として解決し、
+        最終的に妥当性検証後のISO日付文字列を返す。
+    入力:
+        target_date: フロー引数の日付（任意）。
+        config: 設定辞書。
+    出力:
+        str: `YYYY-MM-DD` 形式の日付文字列。
+    例外:
+        ValueError: 日付が空、型不正、形式不正の場合。
+    外部依存リソース:
+        システム時刻（UTC現在日付）。
+    """
     if target_date is not None:
         resolved_target_date = target_date
     else:
@@ -88,10 +156,36 @@ def _resolve_target_date(target_date: str | None, config: dict[str, Any]) -> str
 
 
 def _create_s3_client(aws_credentials: AwsCredentials) -> Any:
+    """共通ユーティリティ経由でS3クライアントを生成する。
+
+    処理内容:
+        共通関数 `create_s3_client` を呼び出してクライアントを返す。
+    入力:
+        aws_credentials: Prefect AwsCredentials ブロック。
+    出力:
+        Any: boto3 S3クライアント。
+    例外:
+        ValueError: クライアント設定が不正な場合。
+    外部依存リソース:
+        Prefectブロック、AWS SDK。
+    """
     return create_s3_client(aws_credentials)
 
 
 def _build_macro_theme_prompt(articles: list[dict[str, str]]) -> str:
+    """記事一覧からマクロテーマ設計用プロンプトを構築する。
+
+    処理内容:
+        記事配列をJSON整形し、固定テンプレートへ埋め込んでLLM入力文を生成する。
+    入力:
+        articles: title / one_sentence_summary を含む記事配列。
+    出力:
+        str: Ollamaへ送るプロンプト文字列。
+    例外:
+        なし。
+    外部依存リソース:
+        なし。
+    """
     articles_json = json.dumps(articles, ensure_ascii=False, indent=2)
     return f"""あなたはニュース記事のテーマ設計者です。目的は、個別記事を分類するための「マクロテーマ体系」を作ることです。
 
@@ -145,6 +239,19 @@ def _build_macro_theme_prompt(articles: list[dict[str, str]]) -> str:
 
 @task(name="load_daily_digest_config_task")
 def load_daily_digest_config_task(config_path: str = "config.yaml") -> dict[str, Any]:
+    """日次ダイジェスト設定を読み込み、検証済みで返す。
+
+    処理内容:
+        YAML設定を読み込み `_validate_daily_digest_config` で妥当性検証する。
+    入力:
+        config_path: 設定ファイルパス。
+    出力:
+        dict[str, Any]: 検証済み設定辞書。
+    例外:
+        ValueError: 設定不正時。
+    外部依存リソース:
+        ローカルファイルシステム。
+    """
     config = _load_yaml_config(config_path)
     _validate_daily_digest_config(config)
     return config
@@ -156,6 +263,24 @@ def fetch_daily_articles_from_s3_task(
     storage: dict[str, Any],
     aws_credentials_block_name: str,
 ) -> list[dict[str, Any]]:
+    """対象日のS3オブジェクトを取得して記事配列として返す。
+
+    処理内容:
+        対象日境界をUTCで計算し、S3オブジェクト一覧を走査して `LastModified` で
+        フィルタしたオブジェクトのみダウンロードし、JSONを辞書へ変換して蓄積する。
+    入力:
+        target_date: 取得対象日（`YYYY-MM-DD`）。
+        storage: `s3_bucket` / `s3_prefix` を含む設定。
+        aws_credentials_block_name: AwsCredentialsブロック名。
+    出力:
+        list[dict[str, Any]]: 対象日の記事データ配列。
+    例外:
+        ValueError: target_date形式不正時。
+        JSONDecodeError: オブジェクト本文がJSONでない場合。
+        boto3由来の例外: S3アクセス失敗時。
+    外部依存リソース:
+        AWS S3、Prefect AwsCredentialsブロック。
+    """
     logger = _get_task_logger()
     target = _parse_target_date(target_date)
     day_start = datetime.combine(target, datetime.min.time(), tzinfo=timezone.utc)
@@ -229,6 +354,23 @@ def design_macro_themes_with_ollama_task(
     ollama_connection: dict[str, str],
     timeout_sec: int = 120,
 ) -> dict[str, Any]:
+    """記事要約群をもとにマクロテーマ体系を生成する。
+
+    処理内容:
+        title と one_sentence_summary を持つ記事のみ抽出し、プロンプト生成後に
+        OllamaへJSON形式で生成依頼して、結果JSON文字列を辞書へ変換する。
+    入力:
+        articles: 記事配列。
+        ollama_connection: Ollama接続設定（base_url/model）。
+        timeout_sec: API呼び出しタイムアウト秒。
+    出力:
+        dict[str, Any]: テーマ体系JSONを辞書化した値。
+    例外:
+        ValueError: 有効記事がない、空応答、JSONオブジェクトでない場合。
+        JSONDecodeError: Ollama応答のJSON解析失敗時。
+    外部依存リソース:
+        Ollama HTTP API。
+    """
     logger = _get_task_logger()
     compact_articles = [
         {
@@ -266,6 +408,21 @@ def design_macro_themes_with_ollama_task(
 
 @flow(name="daily-news-blog-digest-flow")
 def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str = "config.yaml") -> dict[str, Any]:
+    """指定日の記事からマクロテーマ体系を生成するメインフロー。
+
+    処理内容:
+        設定読込・検証、対象日解決、S3記事取得、Ollama接続取得、テーマ生成タスク実行を順に行う。
+    入力:
+        target_date: 対象日（任意、`YYYY-MM-DD`）。
+        config_path: 設定ファイルパス。
+    出力:
+        dict[str, Any]: 生成されたテーマ体系。
+    例外:
+        ValueError: 設定や日付、応答内容が不正な場合。
+        boto3/Ollama由来例外: 外部I/O失敗時。
+    外部依存リソース:
+        ローカル設定ファイル、AWS S3、Prefectブロック、Ollama HTTP API。
+    """
     logger = _get_task_logger()
 
     config = load_daily_digest_config_task(config_path)
