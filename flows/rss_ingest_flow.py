@@ -736,6 +736,41 @@ def summarize_one_sentence_task(article_content: str, ollama_connection: dict[st
     return summary
 
 
+@flow(name="fetch_and_summarize_article_flow")
+def fetch_and_summarize_article_flow(
+    article_url: str,
+    ollama_connection: dict[str, str],
+    timeout_sec: int = 120,
+) -> dict[str, Any]:
+    """単一記事の取得・本文抽出・要約を実行するサブフロー。
+
+    処理内容:
+        記事取得タスクと2種類の要約タスクを順に実行し、要約付き記事辞書を返す。
+    入力:
+        article_url: 記事URL。
+        ollama_connection: Ollama接続設定。
+        timeout_sec: APIタイムアウト秒。
+    出力:
+        dict[str, Any]: `fetch_article_task` の結果に要約2種を付与した辞書。
+    例外:
+        記事取得・要約処理で発生した例外をそのまま送出する。
+    外部依存リソース:
+        HTTP記事ページ、Ollama HTTP API。
+    """
+    article = fetch_article_task(article_url)
+    article["briefing_summary"] = summarize_briefing_task(
+        article_content=article["content"],
+        ollama_connection=ollama_connection,
+        timeout_sec=timeout_sec,
+    )
+    article["one_sentence_summary"] = summarize_one_sentence_task(
+        article_content=article["content"],
+        ollama_connection=ollama_connection,
+        timeout_sec=timeout_sec,
+    )
+    return article
+
+
 @task(name="load_config_task")
 def load_config_task(config_path: str = "config.yaml") -> dict[str, Any]:
     """RSS収集フロー設定を読み込み、検証済みで返す。
@@ -846,24 +881,13 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
             continue
 
         try:
-            article = fetch_article_task(link)
-        except Exception as exc:
-            logger.warning("article fetch skipped: url=%s reason=%s", link, exc)
-            continue
-
-        try:
-            article["briefing_summary"] = summarize_briefing_task(
-                article_content=article["content"],
-                ollama_connection=ollama_connection,
-                timeout_sec=ollama_timeout_sec,
-            )
-            article["one_sentence_summary"] = summarize_one_sentence_task(
-                article_content=article["content"],
+            article = fetch_and_summarize_article_flow(
+                article_url=link,
                 ollama_connection=ollama_connection,
                 timeout_sec=ollama_timeout_sec,
             )
         except Exception as exc:
-            logger.warning("article summarize skipped: url=%s reason=%s", link, exc)
+            logger.warning("article fetch/summarize skipped: url=%s reason=%s", link, exc)
             continue
 
         object_key = store_to_s3_task(
@@ -918,14 +942,8 @@ def fetch_summarize_url_flow(article_url: str, config_path: str = "config.yaml")
     ollama_connection = build_ollama_connection(ollama_secret, config["ollama"]["models"]["rss_ingest_flow"])
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
 
-    article = fetch_article_task(article_url)
-    article["briefing_summary"] = summarize_briefing_task(
-        article_content=article["content"],
-        ollama_connection=ollama_connection,
-        timeout_sec=ollama_timeout_sec,
-    )
-    article["one_sentence_summary"] = summarize_one_sentence_task(
-        article_content=article["content"],
+    article = fetch_and_summarize_article_flow(
+        article_url=article_url,
         ollama_connection=ollama_connection,
         timeout_sec=ollama_timeout_sec,
     )
