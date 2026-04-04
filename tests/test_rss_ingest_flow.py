@@ -20,6 +20,9 @@ storage:
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
   ollama_connection_secret_block: ollama-connection
+ollama:
+  models:
+    rss_ingest_flow: qwen3.5:0.8b
 """
 
 
@@ -33,6 +36,9 @@ storage:
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
   ollama_connection_secret_block: ollama-connection
+ollama:
+  models:
+    rss_ingest_flow: qwen3.5:0.8b
 """
 
 
@@ -72,6 +78,8 @@ storage:
   s3_prefix: rss
 ollama:
   request_timeout_sec: 0
+  models:
+    rss_ingest_flow: qwen3.5:0.8b
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
   ollama_connection_secret_block: ollama-connection

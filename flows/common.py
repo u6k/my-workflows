@@ -13,7 +13,6 @@ from prefect_aws.credentials import AwsCredentials
 
 REQUIRED_OLLAMA_CONNECTION_KEYS = (
     "base_url",
-    "model",
 )
 
 
@@ -154,12 +153,12 @@ def validate_ollama_connection(ollama_connection: Any) -> dict[str, str]:
     """Ollama接続情報の必須キーを検証して利用可能な辞書を返す。
 
     処理内容:
-        入力が辞書であることを確認し、`base_url` と `model` が非空文字列として
+        入力が辞書であることを確認し、`base_url` が非空文字列として
         含まれているかを検証して必要キーのみ返す。
     入力:
         ollama_connection: Secretから取得した接続情報オブジェクト。
     出力:
-        dict[str, str]: `base_url` と `model` を含む接続辞書。
+        dict[str, str]: `base_url` を含む接続辞書。
     例外:
         ValueError: 辞書でない、または必須キーが不足/不正な場合。
     外部依存リソース:
@@ -176,7 +175,30 @@ def validate_ollama_connection(ollama_connection: Any) -> dict[str, str]:
 
     return {
         "base_url": ollama_connection["base_url"],
-        "model": ollama_connection["model"],
+    }
+
+
+def build_ollama_connection(ollama_secret: dict[str, str], model: str) -> dict[str, str]:
+    """Secretの接続情報とモデル名を結合し、生成API呼び出し用設定を返す。
+
+    処理内容:
+        検証済みのSecret接続情報にモデル名を追加し、`base_url` と `model` を
+        そろえた辞書を生成する。
+    入力:
+        ollama_secret: `base_url` を含む検証済み接続辞書。
+        model: フローごとに設定されたモデル名。
+    出力:
+        dict[str, str]: `base_url` と `model` を含む接続辞書。
+    例外:
+        ValueError: モデル名が空または文字列でない場合。
+    外部依存リソース:
+        なし。
+    """
+    if not isinstance(model, str) or not model:
+        raise ValueError("Ollama model must be a non-empty string")
+    return {
+        "base_url": ollama_secret["base_url"],
+        "model": model,
     }
 
 

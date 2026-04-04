@@ -13,9 +13,21 @@ from prefect_aws.credentials import AwsCredentials
 
 if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parent))
-    from common import create_s3_client, invoke_ollama_generate, load_ollama_connection_secret, load_yaml_config
+    from common import (
+        build_ollama_connection,
+        create_s3_client,
+        invoke_ollama_generate,
+        load_ollama_connection_secret,
+        load_yaml_config,
+    )
 else:
-    from .common import create_s3_client, invoke_ollama_generate, load_ollama_connection_secret, load_yaml_config
+    from .common import (
+        build_ollama_connection,
+        create_s3_client,
+        invoke_ollama_generate,
+        load_ollama_connection_secret,
+        load_yaml_config,
+    )
 
 
 def _get_task_logger() -> logging.Logger:
@@ -95,13 +107,20 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
         raise ValueError("config.prefect_blocks.ollama_connection_secret_block must be a non-empty string")
 
     ollama = config.get("ollama")
-    if ollama is not None:
-        if not isinstance(ollama, dict):
-            raise ValueError("config.ollama must be an object")
+    if not isinstance(ollama, dict):
+        raise ValueError("config.ollama must be an object")
 
-        request_timeout_sec = ollama.get("request_timeout_sec")
-        if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
-            raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
+    request_timeout_sec = ollama.get("request_timeout_sec")
+    if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
+        raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
+
+    models = ollama.get("models")
+    if not isinstance(models, dict):
+        raise ValueError("config.ollama.models must be an object")
+
+    digest_model = models.get("daily_news_blog_digest_flow")
+    if not isinstance(digest_model, str) or not digest_model:
+        raise ValueError("config.ollama.models.daily_news_blog_digest_flow must be a non-empty string")
 
 
 def _parse_target_date(target_date: str) -> date:
@@ -434,7 +453,11 @@ def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str
         storage=config["storage"],
         aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
     )
-    ollama_connection = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
+    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
+    ollama_connection = build_ollama_connection(
+        ollama_secret,
+        config["ollama"]["models"]["daily_news_blog_digest_flow"],
+    )
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
     return design_macro_themes_with_ollama_task(
         articles=articles,

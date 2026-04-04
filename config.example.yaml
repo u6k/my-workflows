@@ -17,6 +17,9 @@ target_date: "2026-04-02"
 
 ollama:
   request_timeout_sec: 120
+  models:
+    rss_ingest_flow: qwen3.5:0.8b
+    daily_news_blog_digest_flow: qwen3.5:0.8b
 
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
