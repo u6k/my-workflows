@@ -1,11 +1,97 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from flows import daily_news_blog_digest_flow
+
+
+def test_load_daily_articles_from_sqlite_task_filters_target_date(tmp_path) -> None:
+    """Test case: load daily articles from sqlite task filters by target date."""
+    db_path = tmp_path / "rss_embeddings.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE article_embeddings (
+                article_id TEXT PRIMARY KEY,
+                article_url TEXT NOT NULL,
+                title TEXT,
+                published_timestamp TEXT,
+                fetch_timestamp TEXT,
+                briefing_summary TEXT,
+                one_sentence_summary TEXT,
+                metadata_json TEXT,
+                embedding_json TEXT NOT NULL,
+                embedding_timestamp TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO article_embeddings (
+                article_id, article_url, title, fetch_timestamp, briefing_summary,
+                one_sentence_summary, metadata_json, embedding_json, embedding_timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "a",
+                "https://example.com/a",
+                "A",
+                "2026-04-02T01:00:00+00:00",
+                "brief A",
+                "one A",
+                json.dumps({"source": "x"}),
+                json.dumps([0.1, 0.2]),
+                "2026-04-02T01:00:01+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO article_embeddings (
+                article_id, article_url, title, fetch_timestamp, briefing_summary,
+                one_sentence_summary, metadata_json, embedding_json, embedding_timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "b",
+                "https://example.com/b",
+                "B",
+                "2026-04-03T01:00:00+00:00",
+                "brief B",
+                "one B",
+                "{}",
+                json.dumps([0.9, 0.8]),
+                "2026-04-03T01:00:01+00:00",
+            ),
+        )
+        conn.commit()
+
+    result = daily_news_blog_digest_flow.load_daily_articles_from_sqlite_task.fn(
+        target_date="2026-04-02",
+        sqlite_path=str(db_path),
+    )
+    assert len(result) == 1
+    assert result[0]["id"] == "a"
+    assert result[0]["embedding"] == [0.1, 0.2]
+
+
+def test_build_category_clusters_task_groups_by_similarity() -> None:
+    """Test case: build category clusters task groups similar embeddings."""
+    categories = daily_news_blog_digest_flow.build_category_clusters_task.fn(
+        articles=[
+            {"id": "a", "title": "AI chips", "url": "https://example.com/a", "embedding": [1.0, 0.0]},
+            {"id": "b", "title": "GPU market", "url": "https://example.com/b", "embedding": [0.95, 0.05]},
+            {"id": "c", "title": "FX moves", "url": "https://example.com/c", "embedding": [0.0, 1.0]},
+        ],
+        similarity_threshold=0.9,
+        max_categories=8,
+    )
+    assert len(categories) == 2
+    assert categories[0]["article_count"] == 2
 
 
 def test_load_daily_digest_config_task_returns_config_when_valid(tmp_path) -> None:

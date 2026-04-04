@@ -309,6 +309,35 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _extract_date_from_timestamp(value: Any) -> str | None:
+    """ISO8601タイムスタンプからUTC日付文字列を抽出する。"""
+    if not isinstance(value, str) or not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.date().isoformat()
+
+
+def _average_embedding(vectors: list[list[float]]) -> list[float]:
+    """埋め込みベクトル群の要素平均を返す。"""
+    if not vectors:
+        return []
+    dims = len(vectors[0])
+    if dims == 0:
+        return []
+    for vector in vectors:
+        if len(vector) != dims:
+            raise ValueError("embedding vectors must have same dimension")
+    return [sum(vector[i] for vector in vectors) / len(vectors) for i in range(dims)]
+
+
 @task(name="load_daily_digest_config_task")
 def load_daily_digest_config_task(config_path: str = "config.yaml") -> dict[str, Any]:
     """日次ダイジェスト設定を読み込み、検証済みで返す。
@@ -427,6 +456,228 @@ def fetch_daily_articles_from_s3_task(
         )
 
     return matched_articles
+
+
+@task(name="load_daily_articles_from_sqlite_task")
+def load_daily_articles_from_sqlite_task(
+    target_date: str,
+    sqlite_path: str,
+    max_articles: int | None = None,
+) -> list[dict[str, Any]]:
+    """SQLiteの埋め込みテーブルから対象日記事を読み込む。"""
+    logger = _get_task_logger()
+    _parse_target_date(target_date)
+    if max_articles is not None and max_articles <= 0:
+        raise ValueError("max_articles must be a positive integer when provided")
+
+    with sqlite3.connect(sqlite_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                article_id,
+                article_url,
+                title,
+                published_timestamp,
+                fetch_timestamp,
+                briefing_summary,
+                one_sentence_summary,
+                metadata_json,
+                embedding_json
+            FROM article_embeddings
+            WHERE embedding_json IS NOT NULL
+            """
+        ).fetchall()
+
+    matched: list[dict[str, Any]] = []
+    for row in rows:
+        (
+            article_id,
+            article_url,
+            title,
+            published_timestamp,
+            fetch_timestamp,
+            briefing_summary,
+            one_sentence_summary,
+            metadata_json,
+            embedding_json,
+        ) = row
+        row_date = _extract_date_from_timestamp(fetch_timestamp) or _extract_date_from_timestamp(published_timestamp)
+        if row_date != target_date:
+            continue
+        embedding = json.loads(embedding_json)
+        if not isinstance(embedding, list) or not embedding:
+            continue
+        matched.append(
+            {
+                "id": article_id,
+                "url": article_url,
+                "title": title,
+                "published_timestamp": published_timestamp,
+                "fetch_timestamp": fetch_timestamp,
+                "briefing_summary": briefing_summary,
+                "one_sentence_summary": one_sentence_summary,
+                "metadata": json.loads(metadata_json) if isinstance(metadata_json, str) and metadata_json else {},
+                "embedding": [float(v) for v in embedding],
+            }
+        )
+
+    matched.sort(key=lambda article: str(article.get("fetch_timestamp", "")), reverse=True)
+    if max_articles is not None:
+        matched = matched[:max_articles]
+    logger.info("loaded sqlite articles: total=%d target_date=%s", len(matched), target_date)
+    return matched
+
+
+@task(name="build_category_clusters_task")
+def build_category_clusters_task(
+    articles: list[dict[str, Any]],
+    similarity_threshold: float = 0.82,
+    max_categories: int = 8,
+) -> list[dict[str, Any]]:
+    """記事埋め込みからカテゴリ集合を構築する。"""
+    if not articles:
+        raise ValueError("articles must not be empty")
+    if not (0.0 <= similarity_threshold <= 1.0):
+        raise ValueError("similarity_threshold must be between 0.0 and 1.0")
+    if max_categories <= 0:
+        raise ValueError("max_categories must be a positive integer")
+
+    categories: list[dict[str, Any]] = []
+    for article in articles:
+        embedding = article.get("embedding")
+        if not isinstance(embedding, list) or not embedding:
+            continue
+        best_index = -1
+        best_score = -1.0
+        for idx, category in enumerate(categories):
+            similarity = _cosine_similarity(embedding, category["centroid"])
+            if similarity > best_score:
+                best_score = similarity
+                best_index = idx
+
+        if best_index >= 0 and (best_score >= similarity_threshold or len(categories) >= max_categories):
+            categories[best_index]["articles"].append(article)
+            vectors = [item["embedding"] for item in categories[best_index]["articles"]]
+            categories[best_index]["centroid"] = _average_embedding(vectors)
+        else:
+            categories.append(
+                {
+                    "category_id": f"C{len(categories) + 1:02d}",
+                    "articles": [article],
+                    "centroid": embedding,
+                }
+            )
+
+    for category in categories:
+        representative = category["articles"][0]
+        category["label_hint"] = representative.get("title") or category["category_id"]
+        category["article_count"] = len(category["articles"])
+    categories.sort(key=lambda item: int(item["article_count"]), reverse=True)
+    return categories
+
+
+@task(name="summarize_each_category_task")
+def summarize_each_category_task(
+    categories: list[dict[str, Any]],
+    ollama_connection: dict[str, str],
+    timeout_sec: int = 120,
+) -> list[dict[str, Any]]:
+    """カテゴリごとに要約と名称を生成する。"""
+    logger = _get_task_logger()
+    result: list[dict[str, Any]] = []
+    for category in categories:
+        compact_articles = [
+            {
+                "title": article.get("title", ""),
+                "one_sentence_summary": article.get("one_sentence_summary", ""),
+                "briefing_summary": article.get("briefing_summary", ""),
+            }
+            for article in category.get("articles", [])
+        ]
+        prompt = (
+            "次の記事群を1カテゴリとして要約し、JSONのみで返してください。"
+            " keys: category_name, category_summary, key_points(array<=3)\n"
+            f"{json.dumps(compact_articles, ensure_ascii=False)}"
+        )
+        raw_response = invoke_ollama_generate(
+            ollama_connection=ollama_connection,
+            prompt=prompt,
+            timeout_sec=timeout_sec,
+            response_format="json",
+            logger=logger,
+        )
+        category_name = category.get("label_hint", category.get("category_id", "Category"))
+        category_summary = "要約を生成できませんでした。"
+        key_points: list[str] = []
+        if raw_response:
+            try:
+                parsed = json.loads(raw_response)
+                if isinstance(parsed, dict):
+                    category_name = str(parsed.get("category_name") or category_name)
+                    category_summary = str(parsed.get("category_summary") or category_summary)
+                    if isinstance(parsed.get("key_points"), list):
+                        key_points = [str(v) for v in parsed["key_points"] if isinstance(v, str)]
+            except json.JSONDecodeError:
+                logger.warning("category summary response was not valid JSON: category_id=%s", category.get("category_id"))
+
+        result.append(
+            {
+                "category_id": category.get("category_id"),
+                "category_name": category_name,
+                "category_summary": category_summary,
+                "key_points": key_points,
+                "articles": category.get("articles", []),
+                "article_count": category.get("article_count", 0),
+            }
+        )
+    return result
+
+
+@task(name="compose_blog_style_digest_task")
+def compose_blog_style_digest_task(target_date: str, category_summaries: list[dict[str, Any]]) -> str:
+    """カテゴリ要約をブログ風Markdownに整形する。"""
+    lines = [f"# Daily News Digest ({target_date})", "", "## 今日の全体像"]
+    total_articles = sum(int(category.get("article_count", 0)) for category in category_summaries)
+    lines.append(f"- 全{total_articles}件の記事を{len(category_summaries)}カテゴリに整理しました。")
+    lines.append("")
+
+    for category in category_summaries:
+        lines.append(f"## {category.get('category_name', category.get('category_id', 'カテゴリ'))}")
+        lines.append(str(category.get("category_summary", "")))
+        key_points = category.get("key_points") or []
+        if key_points:
+            lines.append("")
+            for point in key_points:
+                lines.append(f"- {point}")
+        lines.append("")
+        lines.append("代表記事:")
+        for article in category.get("articles", [])[:3]:
+            lines.append(f"- [{article.get('title', 'Untitled')}]({article.get('url', '#')})")
+        lines.append("")
+
+    lines.append("## まとめ")
+    lines.append("- 主要カテゴリの動きを継続ウォッチし、明日以降の変化を追跡します。")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+@task(name="persist_daily_digest_outputs_task")
+def persist_daily_digest_outputs_task(
+    target_date: str,
+    category_summaries: list[dict[str, Any]],
+    blog_markdown: str,
+) -> dict[str, str]:
+    """ダイジェスト成果物をローカル出力ディレクトリへ保存する。"""
+    output_dir = Path("outputs") / target_date
+    output_dir.mkdir(parents=True, exist_ok=True)
+    markdown_path = output_dir / f"blog_summary_{target_date}.md"
+    categories_path = output_dir / f"categories_{target_date}.json"
+    markdown_path.write_text(blog_markdown, encoding="utf-8")
+    categories_path.write_text(json.dumps(category_summaries, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "output_dir": str(output_dir),
+        "markdown_path": str(markdown_path),
+        "categories_path": str(categories_path),
+    }
 
 
 @task(name="design_macro_themes_with_ollama_task")
@@ -623,12 +874,14 @@ def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str
     resolved_target_date = _resolve_target_date(target_date, config)
     logger.info("daily-news-blog-digest-flow start: target_date=%s", resolved_target_date)
 
-    articles = fetch_daily_articles_from_s3_task(
+    sqlite_path = config.get("embeddings", {}).get("sqlite_path", ".data/rss_embeddings.sqlite3")
+    articles = load_daily_articles_from_sqlite_task(
         target_date=resolved_target_date,
-        storage=config["storage"],
-        aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
+        sqlite_path=sqlite_path,
         max_articles=config.get("max_articles"),
     )
+    if not articles:
+        raise ValueError(f"no sqlite articles found for target_date={resolved_target_date}")
     ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
     ollama_connection = build_ollama_connection(
         ollama_secret,
@@ -639,20 +892,32 @@ def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str
         config["ollama"]["models"]["daily_news_blog_digest_flow_embedding"],
     )
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
-    taxonomy = design_macro_themes_with_ollama_task(
+    categories = build_category_clusters_task(
         articles=articles,
+        similarity_threshold=0.82,
+        max_categories=8,
+    )
+    category_summaries = summarize_each_category_task(
+        categories=categories,
         ollama_connection=ollama_connection,
         timeout_sec=ollama_timeout_sec,
     )
-    assignments = assign_articles_to_themes_with_ollama_task(
-        articles=articles,
-        taxonomy=taxonomy,
-        embedding_connection=embedding_connection,
-        timeout_sec=ollama_timeout_sec,
+    blog_markdown = compose_blog_style_digest_task(
+        target_date=resolved_target_date,
+        category_summaries=category_summaries,
+    )
+    output_paths = persist_daily_digest_outputs_task(
+        target_date=resolved_target_date,
+        category_summaries=category_summaries,
+        blog_markdown=blog_markdown,
     )
     return {
-        "taxonomy": taxonomy,
-        "article_assignments": assignments,
+        "target_date": resolved_target_date,
+        "article_count": len(articles),
+        "category_count": len(category_summaries),
+        "categories": category_summaries,
+        "output_paths": output_paths,
+        "embedding_model": embedding_connection["model"],
     }
 
 
