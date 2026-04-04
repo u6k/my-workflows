@@ -890,5 +890,55 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     logger.info("article skipped by existing s3 object: total=%d", skipped_existing_count)
 
 
+@flow(name="fetch_summarize_url_flow")
+def fetch_summarize_url_flow(article_url: str, config_path: str = "config.yaml") -> dict[str, Any]:
+    """単一URLの記事取得・本文抽出・要約を実行する独立フロー。
+
+    処理内容:
+        設定読込、Prefectブロック検証、記事取得、Ollama要約（詳細/一文）を順に実行し、
+        流用しやすい記事辞書として返す。
+    入力:
+        article_url: 取得対象の記事URL。
+        config_path: 設定ファイルパス。
+    出力:
+        dict[str, Any]: `id/url/title/content/metadata/briefing_summary/one_sentence_summary/raw_html` を含む記事辞書。
+    例外:
+        ValueError: URL形式不正、設定不正、要約失敗時など。
+        外部I/O由来例外: HTTP取得・Prefectブロック参照失敗時。
+    外部依存リソース:
+        ローカル設定ファイル、HTTP記事ページ、Prefect Blocks、Ollama API。
+    """
+    if not isinstance(article_url, str) or not article_url.startswith(("http://", "https://")):
+        raise ValueError("article_url must start with http:// or https://")
+
+    logger = _get_task_logger()
+    config = load_config_task(config_path)
+    validate_prerequisites_task(config)
+    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
+    ollama_connection = build_ollama_connection(ollama_secret, config["ollama"]["models"]["rss_ingest_flow"])
+    ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
+
+    article = fetch_article_task(article_url)
+    article["briefing_summary"] = summarize_briefing_task(
+        article_content=article["content"],
+        ollama_connection=ollama_connection,
+        timeout_sec=ollama_timeout_sec,
+    )
+    article["one_sentence_summary"] = summarize_one_sentence_task(
+        article_content=article["content"],
+        ollama_connection=ollama_connection,
+        timeout_sec=ollama_timeout_sec,
+    )
+
+    logger.info(
+        "single article summarize completed: id=%s url=%s title=%s content_length=%d",
+        article["id"],
+        article["url"],
+        article["title"],
+        len(article["content"]),
+    )
+    return article
+
+
 if __name__ == "__main__":
     rss_ingest_flow()

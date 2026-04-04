@@ -716,3 +716,54 @@ def test_normalize_extracted_link_extracts_google_redirect_url() -> None:
     normalized = rss_ingest_flow._normalize_extracted_link(link)
 
     assert normalized == "https://example.com/dest"
+
+
+@patch("flows.rss_ingest_flow.summarize_one_sentence_task")
+@patch("flows.rss_ingest_flow.summarize_briefing_task")
+@patch("flows.rss_ingest_flow.fetch_article_task")
+@patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
+@patch("flows.rss_ingest_flow.load_config_task")
+def test_fetch_summarize_url_flow_returns_article_with_summaries(
+    mock_load_config_task: MagicMock,
+    mock_load_ollama_connection_secret: MagicMock,
+    mock_validate_prerequisites_task: MagicMock,
+    mock_fetch_article_task: MagicMock,
+    mock_summarize_briefing_task: MagicMock,
+    mock_summarize_one_sentence_task: MagicMock,
+) -> None:
+    mock_load_config_task.return_value = {
+        "rss_urls": ["https://example.com/rss.xml"],
+        "retry": {"max_retries": 3},
+        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        "ollama": {"request_timeout_sec": 45, "models": {"rss_ingest_flow": "qwen3.5:0.8b"}},
+        "prefect_blocks": {
+            "aws_credentials_block": "aws-credentials-prod",
+            "ollama_connection_secret_block": "ollama-connection",
+        },
+    }
+    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434"}
+    mock_fetch_article_task.return_value = {
+        "id": "aaaa",
+        "url": "https://example.com/a",
+        "title": "A",
+        "metadata": {},
+        "content": "本文",
+        "raw_html": "<html></html>",
+    }
+    mock_summarize_briefing_task.return_value = "briefing summary"
+    mock_summarize_one_sentence_task.return_value = "one sentence"
+
+    article = rss_ingest_flow.fetch_summarize_url_flow.fn("https://example.com/a", "config.yaml")
+
+    assert article["briefing_summary"] == "briefing summary"
+    assert article["one_sentence_summary"] == "one sentence"
+    mock_validate_prerequisites_task.assert_called_once()
+    mock_fetch_article_task.assert_called_once_with("https://example.com/a")
+    assert mock_summarize_briefing_task.call_args.kwargs["timeout_sec"] == 45
+    assert mock_summarize_one_sentence_task.call_args.kwargs["timeout_sec"] == 45
+
+
+def test_fetch_summarize_url_flow_raises_when_url_is_invalid() -> None:
+    with pytest.raises(ValueError):
+        rss_ingest_flow.fetch_summarize_url_flow.fn("ftp://example.com/a", "config.yaml")
