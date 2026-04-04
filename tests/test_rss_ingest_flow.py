@@ -483,8 +483,17 @@ def test_check_s3_object_exists_task_returns_true_when_embedding_record_exists(t
     rss_ingest_flow._initialize_embeddings_sqlite(str(sqlite_path))
     with sqlite3.connect(sqlite_path) as conn:
         conn.execute(
-            "INSERT INTO article_embeddings (article_id, model, embedding_json) VALUES (?, ?, ?)",
-            ("de0617c481337158695d4e48d5c275d2", "nomic-embed-text", "[0.1,0.2]"),
+            """
+            INSERT INTO article_embeddings (
+                article_id, article_url, embedding_json, embedding_timestamp
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                "de0617c481337158695d4e48d5c275d2",
+                "https://example.com/posts/1",
+                "[0.1,0.2]",
+                "2026-04-04T00:00:00+00:00",
+            ),
         )
         conn.commit()
     result = rss_ingest_flow.check_s3_object_exists_task.fn(
