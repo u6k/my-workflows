@@ -927,7 +927,9 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
     models = config["ollama"]["models"]
     ollama_connection = build_ollama_connection(ollama_secret, models["rss_ingest_flow"])
-    embedding_model = models.get("rss_ingest_flow_embedding", models["rss_ingest_flow"])
+    embedding_model = models.get("rss_ingest_flow_embedding")
+    if not isinstance(embedding_model, str) or not embedding_model:
+        raise ValueError("config.ollama.models.rss_ingest_flow_embedding must be a non-empty string")
     embedding_connection = build_ollama_connection(ollama_secret, embedding_model)
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
     sqlite_path = config.get("embeddings", {}).get("sqlite_path", ".data/rss_embeddings.sqlite3")
