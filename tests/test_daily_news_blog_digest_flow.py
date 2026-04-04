@@ -209,14 +209,24 @@ def test_design_macro_themes_with_ollama_task_returns_python_object(mock_invoke_
 @patch("flows.daily_news_blog_digest_flow.invoke_ollama_generate")
 def test_assign_articles_to_themes_with_ollama_task_returns_assignments(mock_invoke_ollama_generate: MagicMock) -> None:
     """Test case: assign articles to themes with ollama task returns assignments."""
-    mock_invoke_ollama_generate.return_value = """
+    mock_invoke_ollama_generate.side_effect = [
+        """
 {
-  "assignments": [
-    {"article_index": 0, "theme_id": "T01", "confidence": 0.95, "reason": "policy news"},
-    {"article_index": 1, "theme_id": "UNCLASSIFIABLE", "confidence": 0.40, "reason": "edge case"}
-  ]
+  "article_index": 0,
+  "theme_id": "T01",
+  "confidence": 0.95,
+  "reason": "policy news"
 }
-""".strip()
+""".strip(),
+        """
+{
+  "article_index": 1,
+  "theme_id": "UNCLASSIFIABLE",
+  "confidence": 0.40,
+  "reason": "edge case"
+}
+""".strip(),
+    ]
 
     result = daily_news_blog_digest_flow.assign_articles_to_themes_with_ollama_task.fn(
         articles=[
@@ -237,6 +247,7 @@ def test_assign_articles_to_themes_with_ollama_task_returns_assignments(mock_inv
         {"article_index": 0, "theme_id": "T01", "confidence": 0.95, "reason": "policy news"},
         {"article_index": 1, "theme_id": "UNCLASSIFIABLE", "confidence": 0.40, "reason": "edge case"},
     ]
+    assert mock_invoke_ollama_generate.call_count == 2
 
 
 @patch("flows.daily_news_blog_digest_flow.invoke_ollama_generate")
@@ -246,9 +257,10 @@ def test_assign_articles_to_themes_with_ollama_task_raises_when_unknown_theme_id
     """Test case: assign articles to themes with ollama task raises when unknown theme id."""
     mock_invoke_ollama_generate.return_value = """
 {
-  "assignments": [
-    {"article_index": 0, "theme_id": "T99", "confidence": 0.8, "reason": "unknown"}
-  ]
+  "article_index": 0,
+  "theme_id": "T99",
+  "confidence": 0.8,
+  "reason": "unknown"
 }
 """.strip()
 

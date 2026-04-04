@@ -261,16 +261,16 @@ def _build_macro_theme_prompt(articles: list[dict[str, str]]) -> str:
 """
 
 
-def _build_article_assignment_prompt(
-    articles: list[dict[str, Any]],
+def _build_single_article_assignment_prompt(
+    article: dict[str, Any],
     taxonomy: dict[str, Any],
 ) -> str:
-    """記事群とテーマ体系から記事割当プロンプトを構築する。
+    """単一記事とテーマ体系から記事割当プロンプトを構築する。
 
     処理内容:
-        記事を割当用に圧縮し、taxonomyと合わせてLLMへ渡すJSONプロンプトを作成する。
+        単一記事を割当用に圧縮し、taxonomyと合わせてLLMへ渡すJSONプロンプトを作成する。
     入力:
-        articles: 元記事配列（id/title/one_sentence_summary などを含む）。
+        article: 単一記事（id/title/one_sentence_summary などを含む）。
         taxonomy: `themes` を含むテーマ体系辞書。
     出力:
         str: 記事割当用プロンプト文字列。
@@ -279,25 +279,18 @@ def _build_article_assignment_prompt(
     外部依存リソース:
         なし。
     """
-    compact_articles = [
-        {
-            "article_index": index,
-            "id": article.get("id"),
-            "title": article["title"],
-            "one_sentence_summary": article["one_sentence_summary"],
-        }
-        for index, article in enumerate(articles)
-        if isinstance(article.get("title"), str)
-        and article["title"]
-        and isinstance(article.get("one_sentence_summary"), str)
-        and article["one_sentence_summary"]
-    ]
-    articles_json = json.dumps(compact_articles, ensure_ascii=False, indent=2)
+    compact_article = {
+        "article_index": article["article_index"],
+        "id": article.get("id"),
+        "title": article["title"],
+        "one_sentence_summary": article["one_sentence_summary"],
+    }
+    article_json = json.dumps(compact_article, ensure_ascii=False, indent=2)
     taxonomy_json = json.dumps(taxonomy, ensure_ascii=False, indent=2)
-    return f"""あなたはニュース記事の分類担当者です。渡された taxonomy に従って、各記事を1つのテーマへ割り当ててください。
+    return f"""あなたはニュース記事の分類担当者です。渡された taxonomy に従って、記事を1つのテーマへ割り当ててください。
 
 # 制約
-- 各記事は必ず1つの theme_id に割り当てる
+- 記事は必ず1つの theme_id に割り当てる
 - taxonomy にない theme_id は使わない
 - どうしても分類不能なら "UNCLASSIFIABLE" を使う
 - confidence は 0.0 〜 1.0 の実数
@@ -306,24 +299,20 @@ def _build_article_assignment_prompt(
 # 入力 taxonomy
 {taxonomy_json}
 
-# 入力記事
-{articles_json}
+# 入力記事（1件）
+{article_json}
 
 # タスク
-1. 各記事について最も適切な theme_id を選ぶ
+1. 記事について最も適切な theme_id を選ぶ
 2. 1行理由（reason）を付ける
 3. 信頼度（confidence）を 0.0〜1.0 で付ける
 
 # 出力JSONスキーマ
 {{
-  "assignments": [
-    {{
-      "article_index": 0,
-      "theme_id": "T01",
-      "confidence": 0.87,
-      "reason": "string"
-    }}
-  ]
+  "article_index": 0,
+  "theme_id": "T01",
+  "confidence": 0.87,
+  "reason": "string"
 }}
 """
 
@@ -546,8 +535,13 @@ def assign_articles_to_themes_with_ollama_task(
     theme_ids = _validate_theme_ids(taxonomy)
 
     compact_articles = [
-        article
-        for article in articles
+        {
+            "article_index": index,
+            "id": article.get("id"),
+            "title": article["title"],
+            "one_sentence_summary": article["one_sentence_summary"],
+        }
+        for index, article in enumerate(articles)
         if isinstance(article.get("title"), str)
         and article["title"]
         and isinstance(article.get("one_sentence_summary"), str)
@@ -556,30 +550,28 @@ def assign_articles_to_themes_with_ollama_task(
     if not compact_articles:
         raise ValueError("articles must include at least one valid title and one_sentence_summary pair")
 
-    prompt = _build_article_assignment_prompt(compact_articles, taxonomy)
-    raw_response = invoke_ollama_generate(
-        ollama_connection=ollama_connection,
-        prompt=prompt,
-        timeout_sec=timeout_sec,
-        response_format="json",
-        logger=logger,
-    )
-    if not raw_response:
-        raise ValueError("Ollama response does not contain assignment JSON text")
-
-    response_data = json.loads(raw_response)
-    assignments = response_data.get("assignments") if isinstance(response_data, dict) else None
-    if not isinstance(assignments, list):
-        raise ValueError("assignment response must include assignments list")
-
     normalized_assignments: list[dict[str, Any]] = []
-    for assignment in assignments:
+    for article in compact_articles:
+        prompt = _build_single_article_assignment_prompt(article, taxonomy)
+        raw_response = invoke_ollama_generate(
+            ollama_connection=ollama_connection,
+            prompt=prompt,
+            timeout_sec=timeout_sec,
+            response_format="json",
+            logger=logger,
+        )
+        if not raw_response:
+            raise ValueError("Ollama response does not contain assignment JSON text")
+
+        assignment = json.loads(raw_response)
         if not isinstance(assignment, dict):
-            raise ValueError("assignment item must be an object")
+            raise ValueError("assignment response must be a JSON object")
         article_index = assignment.get("article_index")
         theme_id = assignment.get("theme_id")
         if not isinstance(article_index, int):
             raise ValueError("assignment.article_index must be an integer")
+        if article_index != article["article_index"]:
+            raise ValueError("assignment.article_index does not match requested article")
         if not isinstance(theme_id, str) or not theme_id:
             raise ValueError("assignment.theme_id must be a non-empty string")
         if theme_id not in theme_ids and theme_id != "UNCLASSIFIABLE":
