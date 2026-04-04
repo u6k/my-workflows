@@ -212,7 +212,6 @@ def test_assign_articles_to_themes_with_ollama_task_returns_assignments(mock_inv
     mock_invoke_ollama_generate.side_effect = [
         """
 {
-  "article_index": 0,
   "theme_id": "T01",
   "confidence": 0.95,
   "reason": "policy news"
@@ -220,7 +219,6 @@ def test_assign_articles_to_themes_with_ollama_task_returns_assignments(mock_inv
 """.strip(),
         """
 {
-  "article_index": 1,
   "theme_id": "UNCLASSIFIABLE",
   "confidence": 0.40,
   "reason": "edge case"
@@ -244,8 +242,18 @@ def test_assign_articles_to_themes_with_ollama_task_returns_assignments(mock_inv
     )
 
     assert result == [
-        {"article_index": 0, "theme_id": "T01", "confidence": 0.95, "reason": "policy news"},
-        {"article_index": 1, "theme_id": "UNCLASSIFIABLE", "confidence": 0.40, "reason": "edge case"},
+        {
+            "article": {"id": "a", "title": "A", "one_sentence_summary": "A summary"},
+            "theme_id": "T01",
+            "confidence": 0.95,
+            "reason": "policy news",
+        },
+        {
+            "article": {"id": "b", "title": "B", "one_sentence_summary": "B summary"},
+            "theme_id": "UNCLASSIFIABLE",
+            "confidence": 0.40,
+            "reason": "edge case",
+        },
     ]
     assert mock_invoke_ollama_generate.call_count == 2
 
@@ -257,7 +265,6 @@ def test_assign_articles_to_themes_with_ollama_task_raises_when_unknown_theme_id
     """Test case: assign articles to themes with ollama task raises when unknown theme id."""
     mock_invoke_ollama_generate.return_value = """
 {
-  "article_index": 0,
   "theme_id": "T99",
   "confidence": 0.8,
   "reason": "unknown"
@@ -271,29 +278,3 @@ def test_assign_articles_to_themes_with_ollama_task_raises_when_unknown_theme_id
             ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
             timeout_sec=60,
         )
-
-
-@patch("flows.daily_news_blog_digest_flow.invoke_ollama_generate")
-def test_assign_articles_to_themes_with_ollama_task_falls_back_when_article_index_mismatch(
-    mock_invoke_ollama_generate: MagicMock,
-) -> None:
-    """Test case: assign task falls back to requested article index when response index mismatches."""
-    mock_invoke_ollama_generate.return_value = """
-{
-  "article_index": 99,
-  "theme_id": "T01",
-  "confidence": 0.8,
-  "reason": "fallback index"
-}
-""".strip()
-
-    result = daily_news_blog_digest_flow.assign_articles_to_themes_with_ollama_task.fn(
-        articles=[{"id": "b", "title": "B", "one_sentence_summary": "B summary"}],
-        taxonomy={"themes": [{"theme_id": "T01"}]},
-        ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
-        timeout_sec=60,
-    )
-
-    assert result == [
-        {"article_index": 0, "theme_id": "T01", "confidence": 0.8, "reason": "fallback index"},
-    ]

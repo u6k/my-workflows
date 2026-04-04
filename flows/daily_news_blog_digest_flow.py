@@ -280,14 +280,12 @@ def _build_single_article_assignment_prompt(
         なし。
     """
     compact_article = {
-        "article_index": article["article_index"],
         "id": article.get("id"),
         "title": article["title"],
         "one_sentence_summary": article["one_sentence_summary"],
     }
     article_json = json.dumps(compact_article, ensure_ascii=False, indent=2)
     taxonomy_json = json.dumps(taxonomy, ensure_ascii=False, indent=2)
-    article_index = compact_article["article_index"]
     return f"""あなたはニュース記事の分類担当者です。渡された taxonomy に従って、記事を1つのテーマへ割り当ててください。
 
 # 制約
@@ -310,7 +308,6 @@ def _build_single_article_assignment_prompt(
 
 # 出力JSONスキーマ
 {{
-  "article_index": {article_index},
   "theme_id": "T01",
   "confidence": 0.87,
   "reason": "string"
@@ -518,7 +515,7 @@ def assign_articles_to_themes_with_ollama_task(
 
     処理内容:
         taxonomy から有効な theme_id を抽出し、記事群をLLM分類して
-        `article_index/theme_id/confidence/reason` 配列を返す。
+        `article/theme_id/confidence/reason` 配列を返す。
     入力:
         articles: 記事配列。
         taxonomy: `design_macro_themes_with_ollama_task` の出力。
@@ -537,12 +534,14 @@ def assign_articles_to_themes_with_ollama_task(
 
     compact_articles = [
         {
-            "article_index": index,
-            "id": article.get("id"),
-            "title": article["title"],
-            "one_sentence_summary": article["one_sentence_summary"],
+            "source_article": article,
+            "classification_input": {
+                "id": article.get("id"),
+                "title": article["title"],
+                "one_sentence_summary": article["one_sentence_summary"],
+            },
         }
-        for index, article in enumerate(articles)
+        for article in articles
         if isinstance(article.get("title"), str)
         and article["title"]
         and isinstance(article.get("one_sentence_summary"), str)
@@ -553,7 +552,7 @@ def assign_articles_to_themes_with_ollama_task(
 
     normalized_assignments: list[dict[str, Any]] = []
     for article in compact_articles:
-        prompt = _build_single_article_assignment_prompt(article, taxonomy)
+        prompt = _build_single_article_assignment_prompt(article["classification_input"], taxonomy)
         raw_response = invoke_ollama_generate(
             ollama_connection=ollama_connection,
             prompt=prompt,
@@ -567,30 +566,14 @@ def assign_articles_to_themes_with_ollama_task(
         assignment = json.loads(raw_response)
         if not isinstance(assignment, dict):
             raise ValueError("assignment response must be a JSON object")
-        article_index = assignment.get("article_index")
         theme_id = assignment.get("theme_id")
-        requested_article_index = article["article_index"]
-        if not isinstance(article_index, int):
-            logger.warning(
-                "assignment.article_index is invalid; fallback to requested index: requested=%s raw=%s",
-                requested_article_index,
-                article_index,
-            )
-            article_index = requested_article_index
-        elif article_index != requested_article_index:
-            logger.warning(
-                "assignment.article_index mismatch; fallback to requested index: requested=%s returned=%s",
-                requested_article_index,
-                article_index,
-            )
-            article_index = requested_article_index
         if not isinstance(theme_id, str) or not theme_id:
             raise ValueError("assignment.theme_id must be a non-empty string")
         if theme_id not in theme_ids and theme_id != "UNCLASSIFIABLE":
             raise ValueError(f"assignment.theme_id is not in taxonomy: {theme_id}")
         normalized_assignments.append(
             {
-                "article_index": article_index,
+                "article": article["source_article"],
                 "theme_id": theme_id,
                 "confidence": assignment.get("confidence"),
                 "reason": assignment.get("reason"),
