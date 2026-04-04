@@ -90,6 +90,41 @@ def test_fetch_daily_articles_from_s3_task_raises_when_target_date_invalid() -> 
         )
 
 
+@patch("flows.daily_news_blog_digest_flow.AwsCredentials")
+def test_fetch_daily_articles_from_s3_task_respects_max_articles(mock_aws_credentials: MagicMock) -> None:
+    """Test case: fetch daily articles from s3 task respects max articles."""
+    mock_s3_client = MagicMock()
+    mock_s3_client.get_paginator.return_value.paginate.return_value = [
+        {
+            "Contents": [
+                {
+                    "Key": "rss/2026-04-02/aa/20260402-a.json",
+                    "LastModified": datetime(2026, 4, 2, 0, 10, tzinfo=timezone.utc),
+                },
+                {
+                    "Key": "rss/2026-04-02/bb/20260402-b.json",
+                    "LastModified": datetime(2026, 4, 2, 0, 20, tzinfo=timezone.utc),
+                },
+            ]
+        }
+    ]
+    mock_s3_client.get_object.side_effect = [
+        {"Body": MagicMock(read=MagicMock(return_value=b'{"id":"a"}'))},
+        {"Body": MagicMock(read=MagicMock(return_value=b'{"id":"b"}'))},
+    ]
+    mock_aws_credentials.load.return_value.get_boto3_session.return_value.client.return_value = mock_s3_client
+
+    articles = daily_news_blog_digest_flow.fetch_daily_articles_from_s3_task.fn(
+        target_date="2026-04-02",
+        storage={"s3_bucket": "news-bucket", "s3_prefix": "rss"},
+        aws_credentials_block_name="aws-credentials",
+        max_articles=1,
+    )
+
+    assert articles == [{"id": "a"}]
+    assert mock_s3_client.get_object.call_count == 1
+
+
 def test_resolve_target_date_uses_config_value_when_flow_param_is_none() -> None:
     """Test case: resolve target date uses config value when flow param is none."""
     resolved = daily_news_blog_digest_flow._resolve_target_date(
@@ -122,6 +157,22 @@ def test_validate_daily_digest_config_raises_when_ollama_secret_block_missing() 
             {
                 "storage": {"s3_bucket": "bucket", "s3_prefix": "rss"},
                 "prefect_blocks": {"aws_credentials_block": "aws-credentials"},
+            }
+        )
+
+
+def test_validate_daily_digest_config_raises_when_max_articles_invalid() -> None:
+    """Test case: validate daily digest config raises when max articles invalid."""
+    with pytest.raises(ValueError, match="config.max_articles must be a positive integer when provided"):
+        daily_news_blog_digest_flow._validate_daily_digest_config(
+            {
+                "max_articles": 0,
+                "storage": {"s3_bucket": "bucket", "s3_prefix": "rss"},
+                "prefect_blocks": {
+                    "aws_credentials_block": "aws-credentials",
+                    "ollama_connection_secret_block": "ollama-secret",
+                },
+                "ollama": {"models": {"daily_news_blog_digest_flow": "llama3.1:8b"}},
             }
         )
 

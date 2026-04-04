@@ -123,6 +123,10 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
     if not isinstance(digest_model, str) or not digest_model:
         raise ValueError("config.ollama.models.daily_news_blog_digest_flow must be a non-empty string")
 
+    max_articles = config.get("max_articles")
+    if max_articles is not None and (not isinstance(max_articles, int) or max_articles <= 0):
+        raise ValueError("config.max_articles must be a positive integer when provided")
+
 
 def _parse_target_date(target_date: str) -> date:
     """`YYYY-MM-DD` 形式の日付文字列を `date` に変換する。
@@ -360,6 +364,7 @@ def fetch_daily_articles_from_s3_task(
     target_date: str,
     storage: dict[str, Any],
     aws_credentials_block_name: str,
+    max_articles: int | None = None,
 ) -> list[dict[str, Any]]:
     """対象日のS3オブジェクトを取得して記事配列として返す。
 
@@ -370,6 +375,7 @@ def fetch_daily_articles_from_s3_task(
         target_date: 取得対象日（`YYYY-MM-DD`）。
         storage: `s3_bucket` / `s3_prefix` を含む設定。
         aws_credentials_block_name: AwsCredentialsブロック名。
+        max_articles: 取得上限件数（未指定時は上限なし）。
     出力:
         list[dict[str, Any]]: 対象日の記事データ配列。
     例外:
@@ -381,6 +387,8 @@ def fetch_daily_articles_from_s3_task(
     """
     logger = _get_task_logger()
     target = _parse_target_date(target_date)
+    if max_articles is not None and max_articles <= 0:
+        raise ValueError("max_articles must be a positive integer when provided")
     day_start = datetime.combine(target, datetime.min.time(), tzinfo=timezone.utc)
     day_end = day_start + timedelta(days=1)
 
@@ -434,6 +442,11 @@ def fetch_daily_articles_from_s3_task(
                     "data_length": data_length,
                 }
             )
+            if max_articles is not None and len(matched_articles) >= max_articles:
+                logger.info("reached max_articles limit: %d", max_articles)
+                break
+        if max_articles is not None and len(matched_articles) >= max_articles:
+            break
 
     for matched in matched_object_logs:
         logger.info(
@@ -614,6 +627,7 @@ def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str
         target_date=resolved_target_date,
         storage=config["storage"],
         aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
+        max_articles=config.get("max_articles"),
     )
     ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
     ollama_connection = build_ollama_connection(
