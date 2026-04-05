@@ -128,6 +128,27 @@ ollama:
 例:
 - `s3://news-bucket/rss/ab/ab1234...ffff.json`
 
+### 3.6 SQLite 埋め込みストア（追加保存）
+
+RSS ingest では、`briefing_summary` の埋め込みと要約テキストを SQLite にも保存する。
+
+- 保存先: `config.embeddings.sqlite_path`
+- テーブル名: `article_embeddings`
+- 主キー: `article_id`
+
+テーブルカラム:
+
+- `article_id` (TEXT, PK)
+- `article_url` (TEXT, NOT NULL)
+- `title` (TEXT)
+- `published_timestamp` (TEXT)
+- `fetch_timestamp` (TEXT)
+- `briefing_summary` (TEXT)
+- `one_sentence_summary` (TEXT)
+- `metadata_json` (TEXT)
+- `embedding_json` (TEXT, NOT NULL)
+- `embedding_timestamp` (TEXT, NOT NULL)
+
 ---
 
 ## 4. 取得件数ポリシー
@@ -180,6 +201,7 @@ ollama:
 5. `summarize_task`: `briefing_summary` と `one_sentence_summary` 生成
 6. `build_json_task`: 出力 JSON 生成（`metadata` 拡張含む）
 7. `store_to_s3_task`: 指定パスに1記事1ファイル保存
-8. `report_task`: 成功/スキップ/失敗件数サマリ
+8. `upsert_briefing_embedding_to_sqlite_task`: ブリーフィング要約の埋め込みをSQLiteへ保存
+9. `report_task`: 成功/スキップ/失敗件数サマリ
 
 タスクごとのリトライ設定は `config.yaml` の `retry` と整合させること。

@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import hashlib
 import json
+import sqlite3
 import sys
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ if __package__ in {None, ""}:
         build_ollama_connection,
         create_s3_client,
         invoke_ollama_generate,
+        invoke_ollama_embeddings,
         load_ollama_connection_secret,
         load_yaml_config,
     )
@@ -30,6 +33,7 @@ else:
         build_ollama_connection,
         create_s3_client,
         invoke_ollama_generate,
+        invoke_ollama_embeddings,
         load_ollama_connection_secret,
         load_yaml_config,
     )
@@ -150,6 +154,16 @@ def _validate_config(config: dict[str, Any]) -> None:
     rss_ingest_model = models.get("rss_ingest_flow")
     if not isinstance(rss_ingest_model, str) or not rss_ingest_model:
         raise ValueError("config.ollama.models.rss_ingest_flow must be a non-empty string")
+    rss_ingest_embedding_model = models.get("rss_ingest_flow_embedding")
+    if not isinstance(rss_ingest_embedding_model, str) or not rss_ingest_embedding_model:
+        raise ValueError("config.ollama.models.rss_ingest_flow_embedding must be a non-empty string")
+
+    embeddings = config.get("embeddings", {})
+    if not isinstance(embeddings, dict):
+        raise ValueError("config.embeddings must be an object when provided")
+    sqlite_path = embeddings.get("sqlite_path", ".data/rss_embeddings.sqlite3")
+    if not isinstance(sqlite_path, str) or not sqlite_path:
+        raise ValueError("config.embeddings.sqlite_path must be a non-empty string")
 
 
 def _get_task_logger() -> logging.Logger:
@@ -265,6 +279,49 @@ def _create_s3_client(aws_credentials: AwsCredentials) -> Any:
         Prefectブロック、AWS SDK。
     """
     return create_s3_client(aws_credentials)
+
+
+def _initialize_embeddings_sqlite(sqlite_path: str) -> None:
+    """埋め込み保存用SQLiteを初期化する。
+
+    処理内容:
+        `sqlite_path` の親ディレクトリを必要に応じて作成し、`article_embeddings`
+        テーブルと検索用インデックスを作成する。
+    入力:
+        sqlite_path: 埋め込み保存先SQLiteファイルパス。
+    出力:
+        なし。
+    例外:
+        sqlite3.Error: DB作成やDDL実行に失敗した場合。
+    外部依存リソース:
+        ローカルファイルシステム、SQLite。
+    """
+    db_path = Path(sqlite_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS article_embeddings (
+                article_id TEXT PRIMARY KEY,
+                article_url TEXT NOT NULL,
+                title TEXT,
+                published_timestamp TEXT,
+                fetch_timestamp TEXT,
+                briefing_summary TEXT,
+                one_sentence_summary TEXT,
+                metadata_json TEXT,
+                embedding_json TEXT NOT NULL,
+                embedding_timestamp TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_article_embeddings_model
+            ON article_embeddings(article_url)
+            """
+        )
+        conn.commit()
 
 
 def _build_briefing_prompt(article_content: str) -> str:
@@ -599,6 +656,10 @@ def fetch_article_task(article_url: str) -> dict[str, Any]:
     extracted["url"] = article_url
     extracted["id"] = _url_to_md5(article_url)
     extracted["raw_html"] = article_html
+    extracted["fetch_timestamp"] = datetime.now(timezone.utc).isoformat()
+    metadata_published_timestamp = extracted.get("metadata", {}).get("published_timestamp")
+    if isinstance(metadata_published_timestamp, str):
+        extracted["published_timestamp"] = metadata_published_timestamp
     return extracted
 
 
@@ -636,38 +697,55 @@ def store_to_s3_task(article: dict[str, Any], storage: dict[str, Any], aws_crede
 
 
 @task(name="check_s3_object_exists_task")
-def check_s3_object_exists_task(article_url: str, storage: dict[str, Any], aws_credentials_block_name: str) -> dict[str, Any]:
-    """記事URL対応のS3オブジェクト存在有無を確認する。
+def check_s3_object_exists_task(article_url: str, sqlite_path: str) -> dict[str, Any]:
+    """記事URL対応の埋め込みレコード存在有無を確認する。
 
     処理内容:
-        URLをID化してオブジェクトキーを計算し、`head_object` を呼び出して存在判定する。
-        404系エラーは未存在として扱い、その他エラーは再送出する。
+        URLをID化して `article_embeddings` テーブルの存在確認を行う。
     入力:
         article_url: 記事URL。
-        storage: `s3_bucket` / `s3_prefix` を含む設定。
-        aws_credentials_block_name: AwsCredentialsブロック名。
+        sqlite_path: 埋め込み保存先SQLiteファイルパス。
     出力:
-        dict[str, Any]: `exists` / `id` / `object_key` を含む辞書。
+        dict[str, Any]: `exists` / `id` を含む辞書。
     例外:
-        boto3由来例外: 404系以外のS3エラー時。
+        sqlite3.Error: DBアクセス失敗時。
     外部依存リソース:
-        AWS S3、Prefect AwsCredentialsブロック。
+        ローカルSQLiteファイル。
     """
     article_id = _url_to_md5(article_url)
-    object_key = _build_s3_object_key(storage["s3_prefix"], article_id)
+    _initialize_embeddings_sqlite(sqlite_path)
+    with sqlite3.connect(sqlite_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM article_embeddings WHERE article_id=? LIMIT 1",
+            (article_id,),
+        ).fetchone()
+    return {"exists": row is not None, "id": article_id}
 
-    aws_credentials = AwsCredentials.load(aws_credentials_block_name)
-    s3_client = _create_s3_client(aws_credentials)
-    try:
-        s3_client.head_object(Bucket=storage["s3_bucket"], Key=object_key)
-        return {"exists": True, "id": article_id, "object_key": object_key}
-    except Exception as exc:
-        response = getattr(exc, "response", {})
-        error = response.get("Error", {})
-        error_code = str(error.get("Code", ""))
-        if error_code in {"404", "NoSuchKey", "NotFound"}:
-            return {"exists": False, "id": article_id, "object_key": object_key}
-        raise
+
+@task(name="check_embedding_record_exists_task")
+def check_embedding_record_exists_task(article_url: str, sqlite_path: str) -> dict[str, Any]:
+    """記事URL対応のSQLite埋め込みレコード存在有無を確認する。
+
+    処理内容:
+        URLをID化して `article_embeddings` から存在確認し、存在有無を返す。
+    入力:
+        article_url: 記事URL。
+        sqlite_path: 埋め込み保存先SQLiteファイルパス。
+    出力:
+        dict[str, Any]: `exists` / `id` を含む辞書。
+    例外:
+        sqlite3.Error: DBアクセス失敗時。
+    外部依存リソース:
+        ローカルSQLiteファイル。
+    """
+    article_id = _url_to_md5(article_url)
+    _initialize_embeddings_sqlite(sqlite_path)
+    with sqlite3.connect(sqlite_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM article_embeddings WHERE article_id=? LIMIT 1",
+            (article_id,),
+        ).fetchone()
+    return {"exists": row is not None, "id": article_id}
 
 
 @task(name="summarize_briefing_task")
@@ -734,6 +812,95 @@ def summarize_one_sentence_task(article_content: str, ollama_connection: dict[st
     if not summary:
         raise ValueError("Ollama response does not contain one sentence summary text")
     return summary
+
+
+@task(name="upsert_briefing_embedding_to_sqlite_task")
+def upsert_briefing_embedding_to_sqlite_task(
+    article: dict[str, Any],
+    embedding_connection: dict[str, str],
+    sqlite_path: str,
+    timeout_sec: int = 120,
+) -> None:
+    """記事ブリーフィング要約を埋め込み化してSQLiteへ保存する。
+
+    処理内容:
+        `briefing_summary` を埋め込み化し、記事識別子・URL・タイトル・公開時刻・
+        取得時刻・要約（詳細/一文）・metadata・ベクトル・埋め込み時刻を
+        `article_embeddings` テーブルへ upsert 保存する。あわせて記事辞書へ
+        `embedding_json` と `embedding_timestamp` を付与する。
+    入力:
+        article: 記事辞書（`id`, `url`, `briefing_summary` 必須）。
+        embedding_connection: 埋め込みモデルのOllama接続設定。
+        sqlite_path: 埋め込み保存先SQLiteファイルパス。
+        timeout_sec: 埋め込みAPIタイムアウト秒。
+    出力:
+        なし。
+    例外:
+        ValueError: `briefing_summary` が空または文字列でない場合。
+        sqlite3.Error: DB書き込み失敗時。
+        Ollama呼び出し由来例外: 通信・解析失敗時。
+    外部依存リソース:
+        Ollama HTTP API、ローカルSQLiteファイル。
+    """
+    logger = _get_task_logger()
+    briefing_summary = article.get("briefing_summary")
+    if not isinstance(briefing_summary, str) or not briefing_summary:
+        raise ValueError("article.briefing_summary must be a non-empty string")
+
+    embedding = invoke_ollama_embeddings(
+        ollama_connection=embedding_connection,
+        text=briefing_summary,
+        timeout_sec=timeout_sec,
+        logger=logger,
+    )
+    _initialize_embeddings_sqlite(sqlite_path)
+    published_timestamp = article.get("published_timestamp")
+    if not isinstance(published_timestamp, str):
+        published_timestamp = None
+    fetch_timestamp = article.get("fetch_timestamp")
+    if not isinstance(fetch_timestamp, str):
+        fetch_timestamp = datetime.now(timezone.utc).isoformat()
+    embedding_timestamp = datetime.now(timezone.utc).isoformat()
+    one_sentence_summary = article.get("one_sentence_summary")
+    if not isinstance(one_sentence_summary, str):
+        one_sentence_summary = None
+    metadata = article.get("metadata")
+    metadata_json = json.dumps(metadata if isinstance(metadata, dict) else {}, ensure_ascii=False)
+    article["embedding_json"] = embedding
+    article["embedding_timestamp"] = embedding_timestamp
+
+    with sqlite3.connect(sqlite_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO article_embeddings(
+                article_id, article_url, title, published_timestamp, fetch_timestamp, briefing_summary, one_sentence_summary, metadata_json, embedding_json, embedding_timestamp
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(article_id) DO UPDATE SET
+                article_url=excluded.article_url,
+                title=excluded.title,
+                published_timestamp=excluded.published_timestamp,
+                fetch_timestamp=excluded.fetch_timestamp,
+                embedding_json=excluded.embedding_json,
+                briefing_summary=excluded.briefing_summary,
+                one_sentence_summary=excluded.one_sentence_summary,
+                metadata_json=excluded.metadata_json,
+                embedding_timestamp=excluded.embedding_timestamp
+            """,
+            (
+                str(article["id"]),
+                str(article["url"]),
+                article.get("title"),
+                published_timestamp,
+                fetch_timestamp,
+                briefing_summary,
+                one_sentence_summary,
+                metadata_json,
+                json.dumps(embedding),
+                embedding_timestamp,
+            ),
+        )
+        conn.commit()
 
 
 @flow(name="fetch_and_summarize_article_flow")
@@ -845,8 +1012,15 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
     ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
-    ollama_connection = build_ollama_connection(ollama_secret, config["ollama"]["models"]["rss_ingest_flow"])
+    models = config["ollama"]["models"]
+    ollama_connection = build_ollama_connection(ollama_secret, models["rss_ingest_flow"])
+    embedding_model = models.get("rss_ingest_flow_embedding")
+    if not isinstance(embedding_model, str) or not embedding_model:
+        raise ValueError("config.ollama.models.rss_ingest_flow_embedding must be a non-empty string")
+    embedding_connection = build_ollama_connection(ollama_secret, embedding_model)
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
+    sqlite_path = config.get("embeddings", {}).get("sqlite_path", ".data/rss_embeddings.sqlite3")
+    _initialize_embeddings_sqlite(sqlite_path)
 
     all_links: list[str] = []
     for feed_url in list(dict.fromkeys(config["rss_urls"])):
@@ -864,18 +1038,12 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     stored_count = 0
     skipped_existing_count = 0
     for link in unique_links:
-        s3_lookup = check_s3_object_exists_task(
-            article_url=link,
-            storage=config["storage"],
-            aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
-        )
-        if s3_lookup["exists"]:
+        embedding_lookup = check_embedding_record_exists_task(article_url=link, sqlite_path=sqlite_path)
+        if embedding_lookup["exists"]:
             logger.info(
-                "article already exists in s3, skip fetch/summarize: id=%s url=%s s3://%s/%s",
-                s3_lookup["id"],
+                "article already exists in sqlite embeddings, skip fetch/summarize: id=%s url=%s",
+                embedding_lookup["id"],
                 link,
-                config["storage"]["s3_bucket"],
-                s3_lookup["object_key"],
             )
             skipped_existing_count += 1
             continue
@@ -908,10 +1076,20 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
         )
         article_count += 1
         stored_count += 1
+        if isinstance(article.get("briefing_summary"), str) and article["briefing_summary"]:
+            try:
+                upsert_briefing_embedding_to_sqlite_task(
+                    article=article,
+                    embedding_connection=embedding_connection,
+                    sqlite_path=sqlite_path,
+                    timeout_sec=ollama_timeout_sec,
+                )
+            except Exception as exc:
+                logger.warning("embedding upsert skipped: id=%s url=%s reason=%s", article.get("id"), article.get("url"), exc)
 
     logger.info("article fetching completed: total=%d", article_count)
     logger.info("article storing completed: total=%d", stored_count)
-    logger.info("article skipped by existing s3 object: total=%d", skipped_existing_count)
+    logger.info("article skipped by existing sqlite embedding record: total=%d", skipped_existing_count)
 
 
 @flow(name="fetch_summarize_url_flow")

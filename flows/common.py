@@ -275,3 +275,52 @@ def invoke_ollama_generate(
     if logger is not None:
         logger.info("ollama response: %s", response_text)
     return response_text
+
+
+def invoke_ollama_embeddings(
+    ollama_connection: dict[str, str],
+    text: str,
+    timeout_sec: int = 120,
+    logger: logging.Logger | None = None,
+) -> list[float]:
+    """Ollama の `/api/embeddings` を呼び出して埋め込みベクトルを返す。
+
+    処理内容:
+        モデル名と入力テキストからJSONペイロードを作成し、HTTP POSTで
+        Ollamaへ送信する。レスポンス本文をJSONとして解析し、`embedding`
+        を抽出して float 配列として返す。
+    入力:
+        ollama_connection: `base_url` と `model` を含む接続設定。
+        text: 埋め込み対象テキスト。
+        timeout_sec: HTTPタイムアウト秒。
+        logger: 任意ロガー。
+    出力:
+        list[float]: 埋め込みベクトル。
+    例外:
+        ValueError: レスポンスに embedding が存在しない、または不正形式の場合。
+        URLError/HTTPError: 通信失敗やHTTPエラー時。
+        JSONDecodeError: レスポンスJSONの解析に失敗した場合。
+    外部依存リソース:
+        Ollama HTTP API。
+    """
+    payload = {
+        "model": ollama_connection["model"],
+        "prompt": text,
+    }
+    request = Request(
+        f"{ollama_connection['base_url'].rstrip('/')}/api/embeddings",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout_sec) as response:
+        body = response.read().decode("utf-8")
+
+    response_json = json.loads(body)
+    embedding = response_json.get("embedding")
+    if not isinstance(embedding, list) or not embedding:
+        raise ValueError("Ollama embeddings response must include non-empty embedding array")
+    vector = [float(value) for value in embedding]
+    if logger is not None:
+        logger.info("ollama embedding size=%d", len(vector))
+    return vector
