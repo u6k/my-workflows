@@ -33,6 +33,40 @@ else:
     )
 
 
+CATEGORY_SUMMARY_JSON_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "NewsCategorySummary",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["category_name", "category_summary", "key_points"],
+    "properties": {
+        "category_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": "記事群の中心的な共通テーマを表すカテゴリー名",
+        },
+        "category_summary": {
+            "type": "string",
+            "minLength": 80,
+            "maxLength": 1500,
+            "description": "記事群全体を統合した要約。主要論点をできるだけ欠損なく含める",
+        },
+        "key_points": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 8,
+            "uniqueItems": True,
+            "description": "記事群から抽出した重要ポイントの配列",
+            "items": {
+                "type": "string",
+                "minLength": 10,
+                "maxLength": 240,
+            },
+        },
+    },
+}
+
 def _get_task_logger() -> logging.Logger:
     """Prefect実行コンテキストに応じたロガーを返す。
 
@@ -534,15 +568,52 @@ def summarize_each_category_task(
             for article in category.get("articles", [])
         ]
         prompt = (
-            "以下の記事群を1カテゴリとして分析し、JSONのみを返してください。"
-            " keys: category_name, category_summary, key_points(array<=3)\n"
-            f"{json.dumps(compact_articles, ensure_ascii=False)}"
+            "あなたはニュース記事群を統合して分類・要約するアナリストです。\n"
+            "入力として、同一カテゴリー候補に属する複数のニュース記事データ(JSON配列)が与えられます。\n"
+            "各要素には以下の情報が含まれます。\n\n"
+            "- title: 記事タイトル\n"
+            "- one_sentence_summary: 1文要約\n"
+            "- briefing_summary: 詳細要約\n\n"
+            "あなたのタスクは、記事群全体を見て次の3項目を生成することです。\n\n"
+            "1. category_name\n"
+            "- 記事群の中心的な共通テーマを表すカテゴリー名\n"
+            "- 短く、抽象化しすぎず、具体的すぎない表現にする\n"
+            "- 単一の記事にしか当てはまらない表現は避ける\n\n"
+            "2. category_summary\n"
+            "- 記事群全体の内容を統合した要約\n"
+            "- なるべく欠損なく主要論点を含める\n"
+            "- 重複表現は避け、全体として自然で一貫した説明にする\n"
+            "- 複数記事で共通する軸を優先しつつ、重要な周辺論点も必要に応じて含める\n"
+            "- 情報不足の記事がある場合は、無理に補完せず、利用可能な情報の範囲で要約する\n"
+            "- 広告文、購読案内、会員限定告知、本文欠落由来のノイズは要約対象から除外する\n\n"
+            "3. key_points\n"
+            "- 記事群から抽出される重要ポイントを複数列挙する\n"
+            "- 各ポイントは簡潔だが具体性を持たせる\n"
+            "- 互いに重複しないようにする\n"
+            "- 3〜8個程度に収める\n\n"
+            "判断ルール:\n"
+            "- まず、記事群の多数に共通するテーマを特定する\n"
+            "- 一部にノイズ的・周辺的な記事が混ざっていても、全体の主題を優先する\n"
+            "- ただし、周辺記事が主題を補強する場合は要約やキーポイントに含めてよい\n"
+            "- 与えられたテキストに明示されていない事実は追加しない\n"
+            "- 不確実な内容は断定しない\n"
+            "- 出力は必ずJSONのみとし、説明文・Markdown・コードフェンスは付けない\n\n"
+            "出力形式:\n"
+            "{\n"
+            '  "category_name": "...",\n'
+            '  "category_summary": "...",\n'
+            '  "key_points": [\n'
+            '    "...",\n'
+            '    "..."\n'
+            "  ]\n"
+            "}\n\n"
+            f"入力データ:\n{json.dumps(compact_articles, ensure_ascii=False)}"
         )
         raw = invoke_ollama_generate(
             ollama_connection=ollama_connection,
             prompt=prompt,
             timeout_sec=timeout_sec,
-            response_format="json",
+            response_format=CATEGORY_SUMMARY_JSON_SCHEMA,
             logger=logger,
         )
 

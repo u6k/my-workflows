@@ -228,7 +228,7 @@ def invoke_ollama_generate(
     ollama_connection: dict[str, str],
     prompt: str,
     timeout_sec: int = 120,
-    response_format: str | None = None,
+    response_format: str | dict[str, Any] | None = None,
     logger: logging.Logger | None = None,
 ) -> str:
     """Ollama の `/api/generate` を呼び出して生成テキストを返す。
@@ -240,7 +240,7 @@ def invoke_ollama_generate(
         ollama_connection: `base_url` と `model` を含む接続設定。
         prompt: 生成プロンプト文字列。
         timeout_sec: HTTPタイムアウト秒。
-        response_format: Ollamaの `format` パラメータ（例: `"json"`）。
+        response_format: Ollamaの `format` パラメータ（例: `"json"` やJSONスキーマdict）。
         logger: 任意ロガー。
     出力:
         str: 生成されたテキスト（前後空白除去済み）。
