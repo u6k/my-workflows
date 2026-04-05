@@ -33,6 +33,40 @@ else:
     )
 
 
+CATEGORY_SUMMARY_JSON_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "NewsCategorySummary",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["category_name", "category_summary", "key_points"],
+    "properties": {
+        "category_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "description": "記事群の中心的な共通テーマを表すカテゴリー名",
+        },
+        "category_summary": {
+            "type": "string",
+            "minLength": 80,
+            "maxLength": 1500,
+            "description": "記事群全体を統合した要約。主要論点をできるだけ欠損なく含める",
+        },
+        "key_points": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 7,
+            "uniqueItems": True,
+            "description": "記事群から抽出した重要ポイントの配列",
+            "items": {
+                "type": "string",
+                "minLength": 10,
+                "maxLength": 240,
+            },
+        },
+    },
+}
+
 def _get_task_logger() -> logging.Logger:
     """Prefect実行コンテキストに応じたロガーを返す。
 
@@ -116,6 +150,12 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
     s3_prefix = storage.get("s3_prefix")
     if not isinstance(s3_prefix, str):
         raise ValueError("config.storage.s3_prefix must be a string")
+    digest_bucket = storage.get("daily_digest_s3_bucket")
+    if digest_bucket is not None and (not isinstance(digest_bucket, str) or not digest_bucket):
+        raise ValueError("config.storage.daily_digest_s3_bucket must be a non-empty string when provided")
+    digest_prefix = storage.get("daily_digest_s3_prefix")
+    if digest_prefix is not None and not isinstance(digest_prefix, str):
+        raise ValueError("config.storage.daily_digest_s3_prefix must be a string when provided")
 
     prefect_blocks = config.get("prefect_blocks")
     if not isinstance(prefect_blocks, dict):
@@ -173,6 +213,29 @@ def _build_digest_s3_keys(target_date: str, storage: dict[str, Any]) -> dict[str
     return {
         "categories_key": f"{root}/categories/{target_date}.json",
         "blog_key": f"{root}/blog/{target_date}.md",
+    }
+
+
+def _resolve_daily_digest_storage(storage: dict[str, Any]) -> dict[str, str]:
+    """日次ダイジェスト成果物向けのS3保存先を解決する。
+
+    処理内容:
+        `storage.daily_digest_s3_bucket` / `storage.daily_digest_s3_prefix` が指定されていれば
+        それらを優先し、未指定時は `storage.s3_bucket` / `storage.s3_prefix` を利用する。
+    入力:
+        storage: `s3_bucket` / `s3_prefix` と任意で `daily_digest_*` を含む設定。
+    出力:
+        dict[str, str]: 解決済みの `s3_bucket` と `s3_prefix`。
+    例外:
+        なし（事前に `_validate_daily_digest_config` 済みを前提）。
+    外部依存リソース:
+        なし。
+    """
+    bucket = str(storage.get("daily_digest_s3_bucket") or storage["s3_bucket"])
+    prefix = str(storage.get("daily_digest_s3_prefix") if storage.get("daily_digest_s3_prefix") is not None else storage["s3_prefix"])
+    return {
+        "s3_bucket": bucket,
+        "s3_prefix": prefix,
     }
 
 
@@ -534,15 +597,44 @@ def summarize_each_category_task(
             for article in category.get("articles", [])
         ]
         prompt = (
-            "以下の記事群を1カテゴリとして分析し、JSONのみを返してください。"
-            " keys: category_name, category_summary, key_points(array<=3)\n"
-            f"{json.dumps(compact_articles, ensure_ascii=False)}"
+            "以下に与える「ニュース記事データ」は、ある1つのカテゴリーに属する複数の記事情報です。\n"
+            "あなたの役割は、記事群全体を読み解き、このカテゴリーを人間にとって読みやすく、かつ情報欠損をできるだけ抑えて要約することです。\n\n"
+            "# 目的\n"
+            "- 記事群に共通するテーマから「カテゴリー名」を生成する\n"
+            "- 複数記事の内容を統合して「カテゴリー要約」を生成する\n"
+            "- 重要論点を「キーポイント」として複数抽出する\n\n"
+            "# 入力データ\n"
+            "各記事には以下の情報が含まれます。\n"
+            "- title: 記事タイトル\n"
+            "- one_sentence_summary: 記事の一文要約\n"
+            "- briefing_summary: 記事の詳細要約\n\n"
+            "# 出力方針\n"
+            "1. 記事群全体の共通テーマを表す、簡潔で具体的なカテゴリー名を付けること\n"
+            "2. category_summary は、記事ごとの内容をなるべく欠損させずに統合し、自然で読みやすい日本語で 1〜3 段落相当の密度で要約すること\n"
+            "3. 単なる羅列ではなく、全体像 → 主要論点 → 注意点や示唆、の流れでまとめること\n"
+            "4. 記事間で共通する論点は整理・統合し、個別記事に固有だが重要な論点は落とさないこと\n"
+            "5. briefing_summary 内に周辺的・補助的・ノイズ的な情報が含まれていても、カテゴリ全体との関連が薄いものは主軸にしないこと\n"
+            "6. 事実関係は入力データの範囲からのみ述べ、外部知識を補わないこと\n"
+            "7. key_points には、そのカテゴリーを理解するうえで重要な論点を 3〜7 個程度、簡潔な文で入れること\n"
+            "8. key_points は重複を避け、それぞれ異なる観点を持たせること\n"
+            "9. 出力は必ず指定の JSON 形式のみとし、Markdown、説明文、前置き、コードブロックは一切出力しないこと\n\n"
+            "# 出力形式\n"
+            "{\n"
+            '  "category_name": "カテゴリー名",\n'
+            '  "category_summary": "要約",\n'
+            '  "key_points": [\n'
+            '    "キーポイント1",\n'
+            '    "キーポイント2",\n'
+            '    "キーポイント3"\n'
+            "  ]\n"
+            "}\n\n"
+            f"# ニュース記事データ\n{json.dumps(compact_articles, ensure_ascii=False)}"
         )
         raw = invoke_ollama_generate(
             ollama_connection=ollama_connection,
             prompt=prompt,
             timeout_sec=timeout_sec,
-            response_format="json",
+            response_format=CATEGORY_SUMMARY_JSON_SCHEMA,
             logger=logger,
         )
 
@@ -725,10 +817,11 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
     logger.info("daily-news-blog-digest-flow start: target_date=%s", parsed_target_date)
 
     storage = config["storage"]
+    digest_storage = _resolve_daily_digest_storage(storage)
     aws_block = config["prefect_blocks"]["aws_credentials_block"]
     categories_payload = load_categories_from_s3_task(
         target_date=parsed_target_date,
-        storage=storage,
+        storage=digest_storage,
         aws_credentials_block_name=aws_block,
     )
 
@@ -761,13 +854,13 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
         categories_key = save_categories_to_s3_task(
             target_date=parsed_target_date,
             categories=categories,
-            storage=storage,
+            storage=digest_storage,
             aws_credentials_block_name=aws_block,
         )
-        logger.info("category snapshot saved: s3://%s/%s", storage["s3_bucket"], categories_key)
+        logger.info("category snapshot saved: s3://%s/%s", digest_storage["s3_bucket"], categories_key)
         categories_payload = load_categories_from_s3_task(
             target_date=parsed_target_date,
-            storage=storage,
+            storage=digest_storage,
             aws_credentials_block_name=aws_block,
         )
 
@@ -781,7 +874,7 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
     blog_key = save_blog_markdown_to_s3_task(
         target_date=parsed_target_date,
         markdown=markdown,
-        storage=storage,
+        storage=digest_storage,
         aws_credentials_block_name=aws_block,
     )
 
@@ -796,7 +889,7 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
         "skipped_category_build": skipped_category_build,
         "category_count": category_count,
         "article_count": article_count,
-        "categories_s3_key": _build_digest_s3_keys(parsed_target_date, storage)["categories_key"],
+        "categories_s3_key": _build_digest_s3_keys(parsed_target_date, digest_storage)["categories_key"],
         "blog_s3_key": blog_key,
     }
 

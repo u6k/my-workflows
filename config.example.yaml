@@ -10,6 +10,10 @@ retry:
 storage:
   s3_bucket: news-bucket
   s3_prefix: rss
+  # daily-news-blog-digest-flow の成果物（categories/blog）を
+  # HTMLキャッシュとは別の場所へ出したい場合に指定（未指定時は s3_bucket/s3_prefix を利用）
+  daily_digest_s3_bucket: news-bucket
+  daily_digest_s3_prefix: daily-digest
 
 ollama:
   request_timeout_sec: 120

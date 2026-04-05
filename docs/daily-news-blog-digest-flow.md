@@ -43,6 +43,17 @@
 - `clustering_algorithm` (string: `hdbscan` or `kmeans`, default: `hdbscan`)
 - `summary_style` (string, default: `blog-ja`)
 
+### 4.1.1 保存先設定（config.yaml）
+
+日次ダイジェスト成果物（`categories` / `blog`）は、HTMLキャッシュと別ロケーションに保存できる。
+
+- 既定: `storage.s3_bucket` + `storage.s3_prefix`
+- 上書き（任意）:
+  - `storage.daily_digest_s3_bucket`
+  - `storage.daily_digest_s3_prefix`
+
+未指定時は既定値を使用し、指定時のみ日次ダイジェスト成果物の保存先が切り替わる。
+
 ## 4.2 入力記事JSON（例）
 
 ```json
