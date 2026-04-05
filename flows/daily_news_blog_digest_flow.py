@@ -150,6 +150,12 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
     s3_prefix = storage.get("s3_prefix")
     if not isinstance(s3_prefix, str):
         raise ValueError("config.storage.s3_prefix must be a string")
+    digest_bucket = storage.get("daily_digest_s3_bucket")
+    if digest_bucket is not None and (not isinstance(digest_bucket, str) or not digest_bucket):
+        raise ValueError("config.storage.daily_digest_s3_bucket must be a non-empty string when provided")
+    digest_prefix = storage.get("daily_digest_s3_prefix")
+    if digest_prefix is not None and not isinstance(digest_prefix, str):
+        raise ValueError("config.storage.daily_digest_s3_prefix must be a string when provided")
 
     prefect_blocks = config.get("prefect_blocks")
     if not isinstance(prefect_blocks, dict):
@@ -207,6 +213,29 @@ def _build_digest_s3_keys(target_date: str, storage: dict[str, Any]) -> dict[str
     return {
         "categories_key": f"{root}/categories/{target_date}.json",
         "blog_key": f"{root}/blog/{target_date}.md",
+    }
+
+
+def _resolve_daily_digest_storage(storage: dict[str, Any]) -> dict[str, str]:
+    """日次ダイジェスト成果物向けのS3保存先を解決する。
+
+    処理内容:
+        `storage.daily_digest_s3_bucket` / `storage.daily_digest_s3_prefix` が指定されていれば
+        それらを優先し、未指定時は `storage.s3_bucket` / `storage.s3_prefix` を利用する。
+    入力:
+        storage: `s3_bucket` / `s3_prefix` と任意で `daily_digest_*` を含む設定。
+    出力:
+        dict[str, str]: 解決済みの `s3_bucket` と `s3_prefix`。
+    例外:
+        なし（事前に `_validate_daily_digest_config` 済みを前提）。
+    外部依存リソース:
+        なし。
+    """
+    bucket = str(storage.get("daily_digest_s3_bucket") or storage["s3_bucket"])
+    prefix = str(storage.get("daily_digest_s3_prefix") if storage.get("daily_digest_s3_prefix") is not None else storage["s3_prefix"])
+    return {
+        "s3_bucket": bucket,
+        "s3_prefix": prefix,
     }
 
 
@@ -796,10 +825,11 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
     logger.info("daily-news-blog-digest-flow start: target_date=%s", parsed_target_date)
 
     storage = config["storage"]
+    digest_storage = _resolve_daily_digest_storage(storage)
     aws_block = config["prefect_blocks"]["aws_credentials_block"]
     categories_payload = load_categories_from_s3_task(
         target_date=parsed_target_date,
-        storage=storage,
+        storage=digest_storage,
         aws_credentials_block_name=aws_block,
     )
 
@@ -832,13 +862,13 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
         categories_key = save_categories_to_s3_task(
             target_date=parsed_target_date,
             categories=categories,
-            storage=storage,
+            storage=digest_storage,
             aws_credentials_block_name=aws_block,
         )
-        logger.info("category snapshot saved: s3://%s/%s", storage["s3_bucket"], categories_key)
+        logger.info("category snapshot saved: s3://%s/%s", digest_storage["s3_bucket"], categories_key)
         categories_payload = load_categories_from_s3_task(
             target_date=parsed_target_date,
-            storage=storage,
+            storage=digest_storage,
             aws_credentials_block_name=aws_block,
         )
 
@@ -852,7 +882,7 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
     blog_key = save_blog_markdown_to_s3_task(
         target_date=parsed_target_date,
         markdown=markdown,
-        storage=storage,
+        storage=digest_storage,
         aws_credentials_block_name=aws_block,
     )
 
@@ -867,7 +897,7 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
         "skipped_category_build": skipped_category_build,
         "category_count": category_count,
         "article_count": article_count,
-        "categories_s3_key": _build_digest_s3_keys(parsed_target_date, storage)["categories_key"],
+        "categories_s3_key": _build_digest_s3_keys(parsed_target_date, digest_storage)["categories_key"],
         "blog_s3_key": blog_key,
     }
 
