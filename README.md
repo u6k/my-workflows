@@ -53,7 +53,6 @@ cp config.example.yaml config.yaml
 - `retry.backoff_multiplier`: バックオフ係数（任意）
 - `storage.s3_bucket`: S3互換ストレージのバケット名
 - `storage.s3_prefix`: S3 保存プレフィックス
-- `target_date`: `daily-news-blog-digest-flow` で `target_date` パラメータ未指定時に使う日付（`YYYY-MM-DD`、省略時は実行日のUTC日付）
 - 既存オブジェクト判定: `s3://{s3_bucket}/{s3_prefix}/{urlのmd5先頭2文字}/{urlのmd5}.json` が存在する記事は再取得せずスキップ
 - 保存JSON: Trafilatura による本文抽出結果 `content` と、生HTML `raw_html` の両方を保持
 - Ollama 要約: `briefing_summary` と `one_sentence_summary` を本文から生成して保存
@@ -108,11 +107,11 @@ PY
 
 ## Daily News Blog Digest Flow の設定と実行
 
-`flows/daily_news_blog_digest_flow.py` は、`target_date` 引数が未指定の場合に `config.yaml` の `target_date` を参照します。`config.yaml` に `target_date` が無い場合は、実行日の UTC 日付が使われます。
+`flows/daily_news_blog_digest_flow.py` は、`target_date` 引数を**必須**で受け取ります。`config.yaml` から `target_date` は読みません。
 
 ```bash
 source .venv/bin/activate
-python flows/daily_news_blog_digest_flow.py
+python flows/daily_news_blog_digest_flow.py --target-date 2026-04-02
 ```
 
 ### 指定日をコマンドプロンプトから手動実行で渡す
@@ -136,7 +135,7 @@ Prefect の `Parameters` は、**フロー関数の引数**（このフローで
 このため、性質としては次の2種類があります。
 
 - **定義（固定の受け口）**: `@flow` 関数シグネチャで定義される  
-  - 例: `def daily_news_blog_digest_flow(target_date: str | None = None, config_path: str = "config.yaml")`
+  - 例: `def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yaml")`
 - **実行時の値（毎回変更可能）**: 手動実行時に UI / CLI で指定する  
   - 例: `target_date=2026-04-02`
 
@@ -162,6 +161,6 @@ prefect deployment run "daily-news-blog-digest-flow/daily-news-blog-digest-manua
 #### 使い分けの目安
 
 - 「通常は当日UTCで実行、たまに過去日を再実行したい」  
-  - コードのデフォルト（`target_date=None`）を使い、必要なときだけ Run 画面で `target_date` を入力
+  - スケジューラ側で毎日の `target_date` を明示設定し、必要なときだけ Run 画面で上書き
 - 「この deployment は常に前日分を対象にしたい」  
   - deployment 側のデフォルト Parameters を設定し、例外時だけ手動実行で上書き
