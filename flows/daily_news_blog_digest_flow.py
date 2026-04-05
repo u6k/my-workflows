@@ -438,7 +438,22 @@ def build_category_clusters_task(
     target_k = max(min_categories, min(max_categories, target_k))
     target_k = min(target_k, n)
 
-    centroids = [list(valid_articles[i]["embedding"]) for i in range(target_k)]
+    # 初期重心は単純な先頭k件ではなく、farthest-point方式で多様性を確保する。
+    # これにより、入力順が偏っていても初期クラスタが1つに潰れにくくなる。
+    centroids: list[list[float]] = [list(valid_articles[0]["embedding"])]
+    while len(centroids) < target_k:
+        best_article: dict[str, Any] | None = None
+        best_distance = -1.0
+        for article in valid_articles:
+            sims = [_cosine_similarity(article["embedding"], centroid) for centroid in centroids]
+            nearest_similarity = max(sims)
+            distance = 1.0 - nearest_similarity
+            if distance > best_distance:
+                best_distance = distance
+                best_article = article
+        if best_article is None:
+            break
+        centroids.append(list(best_article["embedding"]))
     assignments = [0] * n
 
     for _ in range(max_iterations):
