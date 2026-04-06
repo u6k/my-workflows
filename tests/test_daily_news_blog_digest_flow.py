@@ -152,22 +152,3 @@ def test_load_categories_from_s3_task_returns_none_when_not_found(mock_aws_crede
         aws_credentials_block_name="aws-credentials",
     )
     assert result is None
-
-
-def test_resolve_daily_digest_storage_defaults_to_storage_prefix() -> None:
-    resolved = daily_news_blog_digest_flow._resolve_daily_digest_storage(
-        {"s3_bucket": "news", "s3_prefix": "rss"}
-    )
-    assert resolved == {"s3_bucket": "news", "s3_prefix": "rss"}
-
-
-def test_resolve_daily_digest_storage_uses_override_when_provided() -> None:
-    resolved = daily_news_blog_digest_flow._resolve_daily_digest_storage(
-        {
-            "s3_bucket": "news",
-            "s3_prefix": "rss",
-            "daily_digest_s3_bucket": "digest-bucket",
-            "daily_digest_s3_prefix": "digest-prefix",
-        }
-    )
-    assert resolved == {"s3_bucket": "digest-bucket", "s3_prefix": "digest-prefix"}

@@ -220,7 +220,7 @@ def load_ollama_connection_secret(secret_block_name: str, logger: logging.Logger
     """
     ollama_secret_value = Secret.load(secret_block_name).get()
     if logger is not None:
-        logger.info("Prefect secret loaded: key=ollama_connection_secret_block name=%s", secret_block_name)
+        logger.info("Prefect secret loaded: key=ollama_connection_block name=%s", secret_block_name)
     return validate_ollama_connection(ollama_secret_value)
 
 
