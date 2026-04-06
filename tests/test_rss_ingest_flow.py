@@ -10,39 +10,41 @@ from flows import rss_ingest_flow
 
 
 VALID_CONFIG_YAML = """
-rss_urls:
-  - https://example.com/rss.xml
 retry:
   max_retries: 3
   initial_delay_sec: 2
   backoff_multiplier: 2
-storage:
-  s3_bucket: news-bucket
-  s3_prefix: rss
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
-  ollama_connection_secret_block: ollama-connection
+  ollama_connection_block: ollama-connection
 ollama:
-  models:
-    rss_ingest_flow: qwen3.5:0.8b
-    rss_ingest_flow_embedding: nomic-embed-text
+  request_timeout_sec: 120
+rss_ingest:
+  rss_urls:
+    - https://example.com/rss.xml
+  s3_bucket: news-bucket
+  s3_prefix: rss
+  llm_model: qwen3.5:0.8b
+  llm_embedding: nomic-embed-text
+  sqlite_path: .data/rss_embeddings.sqlite3
 """
 
 
 INVALID_EMPTY_RSS_CONFIG_YAML = """
-rss_urls: []
 retry:
   max_retries: 3
-storage:
-  s3_bucket: news-bucket
-  s3_prefix: rss
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
-  ollama_connection_secret_block: ollama-connection
+  ollama_connection_block: ollama-connection
 ollama:
-  models:
-    rss_ingest_flow: qwen3.5:0.8b
-    rss_ingest_flow_embedding: nomic-embed-text
+  request_timeout_sec: 120
+rss_ingest:
+  rss_urls: []
+  s3_bucket: news-bucket
+  s3_prefix: rss
+  llm_model: qwen3.5:0.8b
+  llm_embedding: nomic-embed-text
+  sqlite_path: .data/rss_embeddings.sqlite3
 """
 
 
@@ -53,9 +55,9 @@ def test_load_config_task_returns_config_when_valid(tmp_path) -> None:
 
     config = rss_ingest_flow.load_config_task.fn(str(config_path))
 
-    assert config["rss_urls"] == ["https://example.com/rss.xml"]
+    assert config["rss_ingest"]["rss_urls"] == ["https://example.com/rss.xml"]
     assert config["retry"]["max_retries"] == 3
-    assert config["storage"]["s3_prefix"] == "rss"
+    assert config["rss_ingest"]["s3_prefix"] == "rss"
     assert config["prefect_blocks"]["aws_credentials_block"] == "aws-credentials-prod"
 
 
@@ -73,21 +75,21 @@ def test_load_config_task_raises_when_ollama_timeout_is_invalid(tmp_path) -> Non
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
-rss_urls:
-  - https://example.com/rss.xml
 retry:
   max_retries: 3
-storage:
-  s3_bucket: news-bucket
-  s3_prefix: rss
 ollama:
   request_timeout_sec: 0
-  models:
-    rss_ingest_flow: qwen3.5:0.8b
-    rss_ingest_flow_embedding: nomic-embed-text
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
-  ollama_connection_secret_block: ollama-connection
+  ollama_connection_block: ollama-connection
+rss_ingest:
+  rss_urls:
+    - https://example.com/rss.xml
+  s3_bucket: news-bucket
+  s3_prefix: rss
+  llm_model: qwen3.5:0.8b
+  llm_embedding: nomic-embed-text
+  sqlite_path: .data/rss_embeddings.sqlite3
 """,
         encoding="utf-8",
     )
@@ -108,12 +110,11 @@ def test_validate_prerequisites_task_loads_blocks_and_json_secret(
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
 
     parsed_config = {
-        "rss_urls": ["https://example.com/rss.xml", "https://example.com/rss.xml"],
+        "rss_ingest": {"rss_urls": ["https://example.com/rss.xml", "https://example.com/rss.xml"]},
         "retry": {"max_retries": 3},
-        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_secret_block": "ollama-connection",
+            "ollama_connection_block": "ollama-connection",
         },
     }
 
@@ -135,12 +136,11 @@ def test_validate_prerequisites_task_raises_when_secret_value_is_not_dict(
     mock_load_ollama_connection_secret.side_effect = ValueError("Ollama Secret block value must be a dict")
 
     parsed_config = {
-        "rss_urls": ["https://example.com/rss.xml"],
+        "rss_ingest": {"rss_urls": ["https://example.com/rss.xml"]},
         "retry": {"max_retries": 3},
-        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_secret_block": "ollama-connection",
+            "ollama_connection_block": "ollama-connection",
         },
     }
 
@@ -545,18 +545,19 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
     mock_check_embedding_record_exists_task: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
-        "rss_urls": ["https://example.com/rss.xml"],
+        "rss_ingest": {
+            "rss_urls": ["https://example.com/rss.xml"],
+            "s3_bucket": "news-bucket",
+            "s3_prefix": "rss",
+            "llm_model": "qwen3.5:0.8b",
+            "llm_embedding": "nomic-embed-text",
+            "sqlite_path": ".data/rss_embeddings.sqlite3",
+        },
         "retry": {"max_retries": 3},
-        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
-            "ollama": {
-                "models": {
-                    "rss_ingest_flow": "qwen3.5:0.8b",
-                    "rss_ingest_flow_embedding": "nomic-embed-text",
-                }
-            },
+        "ollama": {"request_timeout_sec": 120},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_secret_block": "ollama-connection",
+            "ollama_connection_block": "ollama-connection",
         },
     }
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
@@ -603,18 +604,19 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
     mock_check_embedding_record_exists_task: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
-        "rss_urls": ["https://example.com/rss.xml"],
+        "rss_ingest": {
+            "rss_urls": ["https://example.com/rss.xml"],
+            "s3_bucket": "news-bucket",
+            "s3_prefix": "rss",
+            "llm_model": "qwen3.5:0.8b",
+            "llm_embedding": "nomic-embed-text",
+            "sqlite_path": ".data/rss_embeddings.sqlite3",
+        },
         "retry": {"max_retries": 3},
-        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
-            "ollama": {
-                "models": {
-                    "rss_ingest_flow": "qwen3.5:0.8b",
-                    "rss_ingest_flow_embedding": "nomic-embed-text",
-                }
-            },
+        "ollama": {"request_timeout_sec": 120},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_secret_block": "ollama-connection",
+            "ollama_connection_block": "ollama-connection",
         },
     }
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
@@ -659,18 +661,19 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
     mock_check_embedding_record_exists_task: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
-        "rss_urls": ["https://example.com/rss.xml"],
+        "rss_ingest": {
+            "rss_urls": ["https://example.com/rss.xml"],
+            "s3_bucket": "news-bucket",
+            "s3_prefix": "rss",
+            "llm_model": "qwen3.5:0.8b",
+            "llm_embedding": "nomic-embed-text",
+            "sqlite_path": ".data/rss_embeddings.sqlite3",
+        },
         "retry": {"max_retries": 3},
-        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
-            "ollama": {
-                "models": {
-                    "rss_ingest_flow": "qwen3.5:0.8b",
-                    "rss_ingest_flow_embedding": "nomic-embed-text",
-                }
-            },
+        "ollama": {"request_timeout_sec": 120},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_secret_block": "ollama-connection",
+            "ollama_connection_block": "ollama-connection",
         },
     }
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
@@ -704,18 +707,19 @@ def test_rss_ingest_flow_skips_article_when_summarization_fails(
     mock_check_embedding_record_exists_task: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
-        "rss_urls": ["https://example.com/rss.xml"],
+        "rss_ingest": {
+            "rss_urls": ["https://example.com/rss.xml"],
+            "s3_bucket": "news-bucket",
+            "s3_prefix": "rss",
+            "llm_model": "qwen3.5:0.8b",
+            "llm_embedding": "nomic-embed-text",
+            "sqlite_path": ".data/rss_embeddings.sqlite3",
+        },
         "retry": {"max_retries": 3},
-        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
-            "ollama": {
-                "models": {
-                    "rss_ingest_flow": "qwen3.5:0.8b",
-                    "rss_ingest_flow_embedding": "nomic-embed-text",
-                }
-            },
+        "ollama": {"request_timeout_sec": 120},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_secret_block": "ollama-connection",
+            "ollama_connection_block": "ollama-connection",
         },
     }
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
@@ -764,13 +768,19 @@ def test_fetch_summarize_url_flow_returns_article_with_summaries(
     mock_fetch_and_summarize_article_flow: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
-        "rss_urls": ["https://example.com/rss.xml"],
+        "rss_ingest": {
+            "rss_urls": ["https://example.com/rss.xml"],
+            "s3_bucket": "news-bucket",
+            "s3_prefix": "rss",
+            "llm_model": "qwen3.5:0.8b",
+            "llm_embedding": "nomic-embed-text",
+            "sqlite_path": ".data/rss_embeddings.sqlite3",
+        },
         "retry": {"max_retries": 3},
-        "storage": {"s3_bucket": "news-bucket", "s3_prefix": "rss"},
-        "ollama": {"request_timeout_sec": 45, "models": {"rss_ingest_flow": "qwen3.5:0.8b"}},
+        "ollama": {"request_timeout_sec": 45},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_secret_block": "ollama-connection",
+            "ollama_connection_block": "ollama-connection",
         },
     }
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434"}

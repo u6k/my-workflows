@@ -47,23 +47,26 @@ cp config.example.yaml config.yaml
 
 `config.yaml` の主な項目:
 
-- `rss_urls`: 取得対象 RSS/Atom フィード URL の配列（`http://` または `https://`）
+- `rss_ingest.rss_urls`: 取得対象 RSS/Atom フィード URL の配列（`http://` または `https://`）
 - `retry.max_retries`: 失敗時の最大リトライ回数（整数）
 - `retry.initial_delay_sec`: 初回リトライ待機秒（任意）
 - `retry.backoff_multiplier`: バックオフ係数（任意）
-- `storage.s3_bucket`: S3互換ストレージのバケット名
-- `storage.s3_prefix`: S3 保存プレフィックス
+- `rss_ingest.s3_bucket`: S3互換ストレージのバケット名
+- `rss_ingest.s3_prefix`: S3 保存プレフィックス
 - 既存オブジェクト判定: `s3://{s3_bucket}/{s3_prefix}/{urlのmd5先頭2文字}/{urlのmd5}.json` が存在する記事は再取得せずスキップ
 - 保存JSON: Trafilatura による本文抽出結果 `content` と、生HTML `raw_html` の両方を保持
 - Ollama 要約: `briefing_summary` と `one_sentence_summary` を本文から生成して保存
 - `ollama.request_timeout_sec`: Ollama API呼び出しタイムアウト秒（省略時120秒）
-- `ollama.models.rss_ingest_flow`: `rss_ingest_flow` で使うモデル名
-- `ollama.models.rss_ingest_flow_embedding`: `rss_ingest_flow` でブリーフィング要約の埋め込み生成に使うモデル名
-- `ollama.models.daily_news_blog_digest_flow`: `daily-news-blog-digest-flow` で使うモデル名
-- `ollama.models.daily_news_blog_digest_flow_embedding`: `daily-news-blog-digest-flow` で記事分類用埋め込みに使うモデル名
-- `embeddings.sqlite_path`: RSS ingest 時にブリーフィング埋め込みを保存する SQLite ファイルパス（例: `.data/rss_embeddings.sqlite3`）
+- `rss_ingest.llm_model`: `rss_ingest_flow` で使うモデル名
+- `rss_ingest.llm_embedding`: `rss_ingest_flow` でブリーフィング要約の埋め込み生成に使うモデル名
+- `rss_ingest.sqlite_path`: RSS ingest 時にブリーフィング埋め込みを保存する SQLite ファイルパス（例: `.data/rss_embeddings.sqlite3`）
+- `daily_news_blog_digest.s3_bucket`: 日次ダイジェスト成果物の保存バケット
+- `daily_news_blog_digest.s3_prefix`: 日次ダイジェスト成果物の保存プレフィックス
+- `daily_news_blog_digest.llm_model`: `daily-news-blog-digest-flow` で使うモデル名
+- `daily_news_blog_digest.llm_embedding`: `daily-news-blog-digest-flow` で使う埋め込みモデル名
+- `daily_news_blog_digest.sqlite_path`: 日次ダイジェストが参照する SQLite パス
 - `prefect_blocks.aws_credentials_block`: AWS Credentials Block 名
-- `prefect_blocks.ollama_connection_secret_block`: Ollama 接続情報(JSON)を格納した Secret Block 名
+- `prefect_blocks.ollama_connection_block`: Ollama 接続情報(JSON)を格納した Secret Block 名
 
 ### 2. Prefect Block / Secret を作成
 
@@ -73,7 +76,7 @@ cp config.example.yaml config.yaml
 2. **Blocks** 画面で AWS Credentials Block を作成し、名前を `prefect_blocks.aws_credentials_block` の値と一致させる
 3. **Blocks** 画面で Secret Block を1つ作成し、値は JSON 形式で保存する（例）
    - `{"base_url":"http://localhost:11434"}`
-4. Secret Block の名前を `prefect_blocks.ollama_connection_secret_block` と一致させる
+4. Secret Block の名前を `prefect_blocks.ollama_connection_block` と一致させる
 
 > 注意: フローは Block 名・キー名のみログに出力し、Secret の値そのものはログ出力しません。
 
@@ -86,7 +89,7 @@ python flows/rss_ingest_flow.py
 
 ### 4. SQLite 埋め込みストアのセットアップ（RSS ingest）
 
-`rss_ingest_flow` は、記事ごとの `briefing_summary` を埋め込み化し、`embeddings.sqlite_path` で指定した SQLite に保存します。  
+`rss_ingest_flow` は、記事ごとの `briefing_summary` を埋め込み化し、`rss_ingest.sqlite_path` で指定した SQLite に保存します。  
 SQLite ファイルはフロー実行時に自動作成されますが、事前に場所を固定したい場合は次の準備をしておくと安全です。
 
 ```bash

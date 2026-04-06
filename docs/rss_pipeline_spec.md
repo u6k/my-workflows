@@ -14,41 +14,46 @@
 ### 1.2 想定構造
 
 ```yaml
-rss_urls:
-  - https://example.com/rss.xml
-  - https://another.example.org/feed
-
 retry:
   max_retries: 3
   initial_delay_sec: 2
   backoff_multiplier: 2
 
-storage:
-  s3_bucket: news-bucket
-  s3_prefix: rss
-
 ollama:
   request_timeout_sec: 120
+
+rss_ingest:
+  rss_urls:
+    - https://example.com/rss.xml
+    - https://another.example.org/feed
+  s3_bucket: news-bucket
+  s3_prefix: rss
+  llm_model: qwen3.5:0.8b
+  llm_embedding: nomic-embed-text
+  sqlite_path: .data/rss_embeddings.sqlite3
 ```
 
 ### 1.3 キー定義
-- `rss_urls`（必須）
+- `rss_ingest`（必須）
+  - `rss_urls`（必須）
   - 型: 配列（文字列）
   - 説明: RSS/Atom フィード URL の一覧。
   - 本仕様では URL 配列のみを定義できればよい。
+  - `s3_bucket`（必須, 文字列）: S3互換ストレージのバケット名。
+  - `s3_prefix`（必須, 文字列）: S3保存時のプレフィックス。
+  - `llm_model`（必須, 文字列）: 要約生成に使うモデル名。
+  - `llm_embedding`（必須, 文字列）: 埋め込み生成に使うモデル名。
+  - `sqlite_path`（必須, 文字列）: 埋め込み保存先SQLiteパス。
 - `retry`（必須）
   - `max_retries`（必須, 整数）: 失敗時の最大リトライ回数。
   - `initial_delay_sec`（任意, 整数）: 初回リトライ待機秒。
   - `backoff_multiplier`（任意, 数値）: 指数バックオフ係数。
-- `storage`（必須）
-  - `s3_bucket`（必須, 文字列）: S3互換ストレージのバケット名。
-  - `s3_prefix`（必須, 文字列）: S3保存時のプレフィックス。
-- `ollama`（任意）
+- `ollama`（必須）
   - `request_timeout_sec`（任意, 正の整数）: Ollama API呼び出しタイムアウト秒。未指定時は120秒。
 
 ### 1.4 バリデーション要件
-- `rss_urls` が空配列または未定義の場合、フローは開始時点で `FAILED` とする。
-- `rss_urls` の各値は `http://` または `https://` で始まる必要がある。
+- `rss_ingest.rss_urls` が空配列または未定義の場合、フローは開始時点で `FAILED` とする。
+- `rss_ingest.rss_urls` の各値は `http://` または `https://` で始まる必要がある。
 - URL重複は許容するが、実行時に重複排除して同一 URL を二重取得しない。
 
 ---
@@ -132,7 +137,7 @@ ollama:
 
 RSS ingest では、`briefing_summary` の埋め込みと要約テキストを SQLite にも保存する。
 
-- 保存先: `config.embeddings.sqlite_path`
+- 保存先: `config.rss_ingest.sqlite_path`
 - テーブル名: `article_embeddings`
 - 主キー: `article_id`
 

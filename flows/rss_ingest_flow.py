@@ -41,7 +41,7 @@ else:
 
 REQUIRED_PREFECT_BLOCK_KEYS = (
     "aws_credentials_block",
-    "ollama_connection_secret_block",
+    "ollama_connection_block",
 )
 BRIEFING_PROMPT_TEMPLATE = """以下のニュース記事から主要なテーマとアイデアを統合した包括的なブリーフィングドキュメントを作成してください。まずは、最も重要なポイントを簡潔にまとめたエグゼクティブサマリーから始めましょう。本文では、情報源に含まれる主要なテーマ、証拠、そして結論を​​詳細かつ徹底的に検証する必要があります。分析は、明瞭性を確保するために、見出しと箇条書きを用いて論理的に構成する必要があります。トーンは客観的かつ鋭いものでなければなりません。
 
@@ -79,7 +79,7 @@ def _validate_config(config: dict[str, Any]) -> None:
     """RSS収集フローの設定値を検証する。
 
     処理内容:
-        rss_urls / retry / storage / prefect_blocks / ollama の必須キー、型、値域を検証する。
+        rss_ingest / retry / prefect_blocks / ollama の必須キー、型、値域を検証する。
     入力:
         config: 検証対象設定辞書。
     出力:
@@ -89,13 +89,17 @@ def _validate_config(config: dict[str, Any]) -> None:
     外部依存リソース:
         なし。
     """
-    rss_urls = config.get("rss_urls")
+    rss_ingest = config.get("rss_ingest")
+    if not isinstance(rss_ingest, dict):
+        raise ValueError("config.rss_ingest must be an object")
+
+    rss_urls = rss_ingest.get("rss_urls")
     if not isinstance(rss_urls, list) or len(rss_urls) == 0:
-        raise ValueError("config.rss_urls must be a non-empty list")
+        raise ValueError("config.rss_ingest.rss_urls must be a non-empty list")
 
     invalid_urls = [url for url in rss_urls if not isinstance(url, str) or not url.startswith(("http://", "https://"))]
     if invalid_urls:
-        raise ValueError("all config.rss_urls values must start with http:// or https://")
+        raise ValueError("all config.rss_ingest.rss_urls values must start with http:// or https://")
 
     retry = config.get("retry")
     if not isinstance(retry, dict):
@@ -111,17 +115,13 @@ def _validate_config(config: dict[str, Any]) -> None:
     if "backoff_multiplier" in retry and not isinstance(retry["backoff_multiplier"], (int, float)):
         raise ValueError("config.retry.backoff_multiplier must be a number")
 
-    storage = config.get("storage")
-    if not isinstance(storage, dict):
-        raise ValueError("config.storage must be an object")
-
-    s3_prefix = storage.get("s3_prefix")
+    s3_prefix = rss_ingest.get("s3_prefix")
     if not isinstance(s3_prefix, str) or not s3_prefix:
-        raise ValueError("config.storage.s3_prefix must be a non-empty string")
+        raise ValueError("config.rss_ingest.s3_prefix must be a non-empty string")
 
-    s3_bucket = storage.get("s3_bucket")
+    s3_bucket = rss_ingest.get("s3_bucket")
     if not isinstance(s3_bucket, str) or not s3_bucket:
-        raise ValueError("config.storage.s3_bucket must be a non-empty string")
+        raise ValueError("config.rss_ingest.s3_bucket must be a non-empty string")
 
     prefect_blocks = config.get("prefect_blocks")
     if not isinstance(prefect_blocks, dict):
@@ -147,23 +147,15 @@ def _validate_config(config: dict[str, Any]) -> None:
     if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
         raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
 
-    models = ollama.get("models")
-    if not isinstance(models, dict):
-        raise ValueError("config.ollama.models must be an object")
-
-    rss_ingest_model = models.get("rss_ingest_flow")
+    rss_ingest_model = rss_ingest.get("llm_model")
     if not isinstance(rss_ingest_model, str) or not rss_ingest_model:
-        raise ValueError("config.ollama.models.rss_ingest_flow must be a non-empty string")
-    rss_ingest_embedding_model = models.get("rss_ingest_flow_embedding")
+        raise ValueError("config.rss_ingest.llm_model must be a non-empty string")
+    rss_ingest_embedding_model = rss_ingest.get("llm_embedding")
     if not isinstance(rss_ingest_embedding_model, str) or not rss_ingest_embedding_model:
-        raise ValueError("config.ollama.models.rss_ingest_flow_embedding must be a non-empty string")
-
-    embeddings = config.get("embeddings", {})
-    if not isinstance(embeddings, dict):
-        raise ValueError("config.embeddings must be an object when provided")
-    sqlite_path = embeddings.get("sqlite_path", ".data/rss_embeddings.sqlite3")
+        raise ValueError("config.rss_ingest.llm_embedding must be a non-empty string")
+    sqlite_path = rss_ingest.get("sqlite_path")
     if not isinstance(sqlite_path, str) or not sqlite_path:
-        raise ValueError("config.embeddings.sqlite_path must be a non-empty string")
+        raise ValueError("config.rss_ingest.sqlite_path must be a non-empty string")
 
 
 def _get_task_logger() -> logging.Logger:
@@ -977,7 +969,7 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
     """
     logger = get_run_logger()
 
-    rss_urls = config["rss_urls"]
+    rss_urls = config["rss_ingest"]["rss_urls"]
     unique_count = len(set(rss_urls))
     logger.info("rss_urls validation passed: total=%d unique=%d", len(rss_urls), unique_count)
 
@@ -987,7 +979,7 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
     AwsCredentials.load(aws_credentials_block)
     logger.info("Prefect block loaded: key=aws_credentials_block name=%s", aws_credentials_block)
 
-    ollama_secret_block = block_config["ollama_connection_secret_block"]
+    ollama_secret_block = block_config["ollama_connection_block"]
     load_ollama_connection_secret(ollama_secret_block, logger=logger)
 
 
@@ -1011,19 +1003,19 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
 
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
-    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
-    models = config["ollama"]["models"]
-    ollama_connection = build_ollama_connection(ollama_secret, models["rss_ingest_flow"])
-    embedding_model = models.get("rss_ingest_flow_embedding")
+    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_block"])
+    rss_ingest_config = config["rss_ingest"]
+    ollama_connection = build_ollama_connection(ollama_secret, rss_ingest_config["llm_model"])
+    embedding_model = rss_ingest_config.get("llm_embedding")
     if not isinstance(embedding_model, str) or not embedding_model:
-        raise ValueError("config.ollama.models.rss_ingest_flow_embedding must be a non-empty string")
+        raise ValueError("config.rss_ingest.llm_embedding must be a non-empty string")
     embedding_connection = build_ollama_connection(ollama_secret, embedding_model)
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
-    sqlite_path = config.get("embeddings", {}).get("sqlite_path", ".data/rss_embeddings.sqlite3")
+    sqlite_path = rss_ingest_config["sqlite_path"]
     _initialize_embeddings_sqlite(sqlite_path)
 
     all_links: list[str] = []
-    for feed_url in list(dict.fromkeys(config["rss_urls"])):
+    for feed_url in list(dict.fromkeys(rss_ingest_config["rss_urls"])):
         links = fetch_feed_task(feed_url)
         all_links.extend(links)
 
@@ -1060,7 +1052,10 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
 
         object_key = store_to_s3_task(
             article=article,
-            storage=config["storage"],
+            storage={
+                "s3_bucket": rss_ingest_config["s3_bucket"],
+                "s3_prefix": rss_ingest_config["s3_prefix"],
+            },
             aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
         )
 
@@ -1068,7 +1063,7 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
             "article fetched and stored: id=%s url=%s s3://%s/%s title=%s metadata=%s content_length=%d",
             article["id"],
             article["url"],
-            config["storage"]["s3_bucket"],
+            rss_ingest_config["s3_bucket"],
             object_key,
             article["title"],
             article["metadata"],
@@ -1116,8 +1111,8 @@ def fetch_summarize_url_flow(article_url: str, config_path: str = "config.yaml")
     logger = _get_task_logger()
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
-    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
-    ollama_connection = build_ollama_connection(ollama_secret, config["ollama"]["models"]["rss_ingest_flow"])
+    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_block"])
+    ollama_connection = build_ollama_connection(ollama_secret, config["rss_ingest"]["llm_model"])
     ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
 
     article = fetch_and_summarize_article_flow(

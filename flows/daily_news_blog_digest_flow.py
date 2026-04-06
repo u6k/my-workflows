@@ -129,7 +129,7 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
     """日次ダイジェストフロー設定の妥当性を検証する。
 
     処理内容:
-        storage / prefect_blocks / ollama / embeddings 配下の必須キー、型、
+        daily_news_blog_digest / prefect_blocks / ollama 配下の必須キー、型、
         数値範囲を検証する。`target_date` は設定ファイルからは読まないため
         検証対象に含めない。
     入力:
@@ -141,21 +141,15 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
     外部依存リソース:
         なし。
     """
-    storage = config.get("storage")
-    if not isinstance(storage, dict):
-        raise ValueError("config.storage must be an object")
-    s3_bucket = storage.get("s3_bucket")
+    digest_config = config.get("daily_news_blog_digest")
+    if not isinstance(digest_config, dict):
+        raise ValueError("config.daily_news_blog_digest must be an object")
+    s3_bucket = digest_config.get("s3_bucket")
     if not isinstance(s3_bucket, str) or not s3_bucket:
-        raise ValueError("config.storage.s3_bucket must be a non-empty string")
-    s3_prefix = storage.get("s3_prefix")
-    if not isinstance(s3_prefix, str):
-        raise ValueError("config.storage.s3_prefix must be a string")
-    digest_bucket = storage.get("daily_digest_s3_bucket")
-    if digest_bucket is not None and (not isinstance(digest_bucket, str) or not digest_bucket):
-        raise ValueError("config.storage.daily_digest_s3_bucket must be a non-empty string when provided")
-    digest_prefix = storage.get("daily_digest_s3_prefix")
-    if digest_prefix is not None and not isinstance(digest_prefix, str):
-        raise ValueError("config.storage.daily_digest_s3_prefix must be a string when provided")
+        raise ValueError("config.daily_news_blog_digest.s3_bucket must be a non-empty string")
+    s3_prefix = digest_config.get("s3_prefix")
+    if not isinstance(s3_prefix, str) or not s3_prefix:
+        raise ValueError("config.daily_news_blog_digest.s3_prefix must be a non-empty string")
 
     prefect_blocks = config.get("prefect_blocks")
     if not isinstance(prefect_blocks, dict):
@@ -163,9 +157,9 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
     aws_block = prefect_blocks.get("aws_credentials_block")
     if not isinstance(aws_block, str) or not aws_block:
         raise ValueError("config.prefect_blocks.aws_credentials_block must be a non-empty string")
-    ollama_block = prefect_blocks.get("ollama_connection_secret_block")
+    ollama_block = prefect_blocks.get("ollama_connection_block")
     if not isinstance(ollama_block, str) or not ollama_block:
-        raise ValueError("config.prefect_blocks.ollama_connection_secret_block must be a non-empty string")
+        raise ValueError("config.prefect_blocks.ollama_connection_block must be a non-empty string")
 
     ollama = config.get("ollama")
     if not isinstance(ollama, dict):
@@ -173,19 +167,17 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
     request_timeout_sec = ollama.get("request_timeout_sec")
     if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
         raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
-    models = ollama.get("models")
-    if not isinstance(models, dict):
-        raise ValueError("config.ollama.models must be an object")
-    digest_model = models.get("daily_news_blog_digest_flow")
+    digest_model = digest_config.get("llm_model")
     if not isinstance(digest_model, str) or not digest_model:
-        raise ValueError("config.ollama.models.daily_news_blog_digest_flow must be a non-empty string")
+        raise ValueError("config.daily_news_blog_digest.llm_model must be a non-empty string")
 
-    embeddings = config.get("embeddings")
-    if not isinstance(embeddings, dict):
-        raise ValueError("config.embeddings must be an object")
-    sqlite_path = embeddings.get("sqlite_path")
+    embedding_model = digest_config.get("llm_embedding")
+    if not isinstance(embedding_model, str) or not embedding_model:
+        raise ValueError("config.daily_news_blog_digest.llm_embedding must be a non-empty string")
+
+    sqlite_path = digest_config.get("sqlite_path")
     if not isinstance(sqlite_path, str) or not sqlite_path:
-        raise ValueError("config.embeddings.sqlite_path must be a non-empty string")
+        raise ValueError("config.daily_news_blog_digest.sqlite_path must be a non-empty string")
 
     max_articles = config.get("max_articles")
     if max_articles is not None and (not isinstance(max_articles, int) or max_articles <= 0):
@@ -213,29 +205,6 @@ def _build_digest_s3_keys(target_date: str, storage: dict[str, Any]) -> dict[str
     return {
         "categories_key": f"{root}/categories/{target_date}.json",
         "blog_key": f"{root}/blog/{target_date}.md",
-    }
-
-
-def _resolve_daily_digest_storage(storage: dict[str, Any]) -> dict[str, str]:
-    """日次ダイジェスト成果物向けのS3保存先を解決する。
-
-    処理内容:
-        `storage.daily_digest_s3_bucket` / `storage.daily_digest_s3_prefix` が指定されていれば
-        それらを優先し、未指定時は `storage.s3_bucket` / `storage.s3_prefix` を利用する。
-    入力:
-        storage: `s3_bucket` / `s3_prefix` と任意で `daily_digest_*` を含む設定。
-    出力:
-        dict[str, str]: 解決済みの `s3_bucket` と `s3_prefix`。
-    例外:
-        なし（事前に `_validate_daily_digest_config` 済みを前提）。
-    外部依存リソース:
-        なし。
-    """
-    bucket = str(storage.get("daily_digest_s3_bucket") or storage["s3_bucket"])
-    prefix = str(storage.get("daily_digest_s3_prefix") if storage.get("daily_digest_s3_prefix") is not None else storage["s3_prefix"])
-    return {
-        "s3_bucket": bucket,
-        "s3_prefix": prefix,
     }
 
 
@@ -816,8 +785,10 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
     config = load_daily_digest_config_task(config_path)
     logger.info("daily-news-blog-digest-flow start: target_date=%s", parsed_target_date)
 
-    storage = config["storage"]
-    digest_storage = _resolve_daily_digest_storage(storage)
+    digest_storage = {
+        "s3_bucket": config["daily_news_blog_digest"]["s3_bucket"],
+        "s3_prefix": config["daily_news_blog_digest"]["s3_prefix"],
+    }
     aws_block = config["prefect_blocks"]["aws_credentials_block"]
     categories_payload = load_categories_from_s3_task(
         target_date=parsed_target_date,
@@ -829,7 +800,7 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
     if categories_payload is None:
         articles = load_daily_articles_from_sqlite_task(
             target_date=parsed_target_date,
-            sqlite_path=config["embeddings"]["sqlite_path"],
+            sqlite_path=config["daily_news_blog_digest"]["sqlite_path"],
             max_articles=config.get("max_articles"),
         )
         if not articles:
@@ -841,10 +812,10 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
             max_categories=12,
             max_iterations=6,
         )
-        ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_secret_block"])
+        ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_block"])
         ollama_connection = build_ollama_connection(
             ollama_secret,
-            config["ollama"]["models"]["daily_news_blog_digest_flow"],
+            config["daily_news_blog_digest"]["llm_model"],
         )
         categories = summarize_each_category_task(
             categories=clusters,

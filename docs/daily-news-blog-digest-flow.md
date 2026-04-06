@@ -45,14 +45,10 @@
 
 ### 4.1.1 保存先設定（config.yaml）
 
-日次ダイジェスト成果物（`categories` / `blog`）は、HTMLキャッシュと別ロケーションに保存できる。
+日次ダイジェスト成果物（`categories` / `blog`）の保存先は `daily_news_blog_digest` セクションで指定する。
 
-- 既定: `storage.s3_bucket` + `storage.s3_prefix`
-- 上書き（任意）:
-  - `storage.daily_digest_s3_bucket`
-  - `storage.daily_digest_s3_prefix`
-
-未指定時は既定値を使用し、指定時のみ日次ダイジェスト成果物の保存先が切り替わる。
+- `daily_news_blog_digest.s3_bucket`
+- `daily_news_blog_digest.s3_prefix`
 
 ## 4.2 入力記事JSON（例）
 

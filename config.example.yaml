@@ -1,31 +1,28 @@
-rss_urls:
-  - https://example.com/rss.xml
-  - https://another.example.org/feed
-
 retry:
   max_retries: 3
   initial_delay_sec: 2
   backoff_multiplier: 2
 
-storage:
-  s3_bucket: news-bucket
-  s3_prefix: rss
-  # daily-news-blog-digest-flow の成果物（categories/blog）を
-  # HTMLキャッシュとは別の場所へ出したい場合に指定（未指定時は s3_bucket/s3_prefix を利用）
-  daily_digest_s3_bucket: news-bucket
-  daily_digest_s3_prefix: daily-digest
-
 ollama:
   request_timeout_sec: 120
-  models:
-    rss_ingest_flow: qwen3.5:0.8b
-    rss_ingest_flow_embedding: nomic-embed-text
-    daily_news_blog_digest_flow: qwen3.5:0.8b
-    daily_news_blog_digest_flow_embedding: nomic-embed-text
-
-embeddings:
-  sqlite_path: .data/rss_embeddings.sqlite3
 
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
-  ollama_connection_secret_block: ollama-connection
+  ollama_connection_block: ollama-connection
+
+rss_ingest:
+  rss_urls:
+    - https://example.com/rss.xml
+    - https://another.example.org/feed
+  s3_bucket: news-bucket
+  s3_prefix: rss
+  llm_model: qwen3.5:0.8b
+  llm_embedding: nomic-embed-text
+  sqlite_path: .data/rss_embeddings.sqlite3
+
+daily_news_blog_digest:
+  s3_bucket: news-bucket
+  s3_prefix: daily-digest
+  llm_model: qwen3.5:0.8b
+  llm_embedding: nomic-embed-text
+  sqlite_path: .data/rss_embeddings.sqlite3
