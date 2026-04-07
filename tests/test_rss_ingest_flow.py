@@ -230,9 +230,9 @@ def test_fetch_feed_task_returns_links_from_feed(
     assert links == ["https://example.com/a", "https://example.com/b", "https://example.com/c"]
     mock_urlopen.assert_called_once_with("https://example.com/rss.xml", timeout=30)
     mock_logger.debug.assert_called_once_with(
-        "extracted links: feed_url=%s links=%s",
+        "rss feed fetched: feed_url=%s link_count=%d",
         "https://example.com/rss.xml",
-        ["https://example.com/a", "https://example.com/b", "https://example.com/c"],
+        3,
     )
 
 
@@ -252,9 +252,9 @@ def test_fetch_feed_task_raises_when_no_entries(
         rss_ingest_flow.fetch_feed_task.fn("https://example.com/empty.xml")
 
     mock_logger.debug.assert_called_once_with(
-        "extracted links: feed_url=%s links=%s",
+        "rss feed fetched: feed_url=%s link_count=%d",
         "https://example.com/empty.xml",
-        [],
+        0,
     )
 
 
@@ -577,14 +577,15 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
         mock_get_task_logger.return_value = mock_logger
         rss_ingest_flow.rss_ingest_flow.fn("config.yaml")
 
-    mock_logger.warning.assert_called_once()
-    warning_args = mock_logger.warning.call_args[0]
-    assert warning_args[0] == "article fetch/summarize skipped: url=%s reason=%s"
-    assert warning_args[1] == "https://example.com/a"
-    assert str(warning_args[2]) == "unexpected status code: 500"
-    mock_logger.info.assert_any_call("feed links extracted: total=%d", 2)
-    mock_logger.info.assert_any_call("feed links extracted: total=%d unique=%d", 2, 2)
-    mock_logger.info.assert_any_call("article fetching completed: total=%d", 1)
+    mock_logger.info.assert_any_call("all rss feeds fetched: link_count=%d", 2)
+    mock_logger.info.assert_any_call("deduplicated links prepared: link_count=%d", 2)
+    mock_logger.info.assert_any_call("page summarization started: progress=%d/%d url=%s", 1, 2, "https://example.com/a")
+    mock_logger.info.assert_any_call("page summarization started: progress=%d/%d url=%s", 2, 2, "https://example.com/b")
+    skip_call = next(
+        call for call in mock_logger.info.call_args_list if call.args[0] == "page summarization skipped: url=%s reason=%s"
+    )
+    assert skip_call.args[1] == "https://example.com/a"
+    assert str(skip_call.args[2]) == "unexpected status code: 500"
 
 
 @patch("flows.rss_ingest_flow.check_embedding_record_exists_task")
@@ -636,12 +637,13 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
         mock_get_task_logger.return_value = mock_logger
         rss_ingest_flow.rss_ingest_flow.fn("config.yaml")
 
-    mock_logger.warning.assert_called_once()
-    warning_args = mock_logger.warning.call_args[0]
-    assert warning_args[0] == "article fetch/summarize skipped: url=%s reason=%s"
-    assert warning_args[1] == "https://example.com/a"
-    assert str(warning_args[2]) == "boom"
-    mock_logger.info.assert_any_call("article fetching completed: total=%d", 1)
+    mock_logger.info.assert_any_call("all rss feeds fetched: link_count=%d", 2)
+    mock_logger.info.assert_any_call("deduplicated links prepared: link_count=%d", 2)
+    skip_call = next(
+        call for call in mock_logger.info.call_args_list if call.args[0] == "page summarization skipped: url=%s reason=%s"
+    )
+    assert skip_call.args[1] == "https://example.com/a"
+    assert str(skip_call.args[2]) == "boom"
 
 
 @patch("flows.rss_ingest_flow.check_embedding_record_exists_task")
@@ -687,7 +689,8 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
 
     mock_fetch_and_summarize_article_flow.assert_not_called()
     mock_store_to_s3_task.assert_not_called()
-    mock_logger.info.assert_any_call("article skipped by existing sqlite embedding record: total=%d", 1)
+    mock_logger.info.assert_any_call("all rss feeds fetched: link_count=%d", 1)
+    mock_logger.info.assert_any_call("deduplicated links prepared: link_count=%d", 0)
 
 
 @patch("flows.rss_ingest_flow.check_embedding_record_exists_task")
@@ -733,11 +736,12 @@ def test_rss_ingest_flow_skips_article_when_summarization_fails(
         rss_ingest_flow.rss_ingest_flow.fn("config.yaml")
 
     mock_store_to_s3_task.assert_not_called()
-    mock_logger.warning.assert_called_once()
-    warning_args = mock_logger.warning.call_args[0]
-    assert warning_args[0] == "article fetch/summarize skipped: url=%s reason=%s"
-    assert warning_args[1] == "https://example.com/a"
-    assert str(warning_args[2]) == "ollama error"
+    mock_logger.info.assert_any_call("page summarization started: progress=%d/%d url=%s", 1, 1, "https://example.com/a")
+    skip_call = next(
+        call for call in mock_logger.info.call_args_list if call.args[0] == "page summarization skipped: url=%s reason=%s"
+    )
+    assert skip_call.args[1] == "https://example.com/a"
+    assert str(skip_call.args[2]) == "ollama error"
 
 
 def test_get_task_logger_returns_standard_logger_when_prefect_context_missing() -> None:

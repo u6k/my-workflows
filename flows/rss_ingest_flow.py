@@ -158,6 +158,37 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise ValueError("config.rss_ingest.sqlite_path must be a non-empty string")
 
 
+def _build_safe_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+    """ログ出力用の非機密設定スナップショットを返す。"""
+    rss_ingest = config.get("rss_ingest", {})
+    retry = config.get("retry", {})
+    ollama = config.get("ollama", {})
+    prefect_blocks = config.get("prefect_blocks", {})
+
+    return {
+        "retry": {
+            "max_retries": retry.get("max_retries"),
+            "initial_delay_sec": retry.get("initial_delay_sec"),
+            "backoff_multiplier": retry.get("backoff_multiplier"),
+        },
+        "ollama": {
+            "request_timeout_sec": ollama.get("request_timeout_sec"),
+        },
+        "prefect_blocks": {
+            "aws_credentials_block": prefect_blocks.get("aws_credentials_block"),
+            "ollama_connection_block": prefect_blocks.get("ollama_connection_block"),
+        },
+        "rss_ingest": {
+            "rss_urls": rss_ingest.get("rss_urls"),
+            "s3_bucket": rss_ingest.get("s3_bucket"),
+            "s3_prefix": rss_ingest.get("s3_prefix"),
+            "llm_model": rss_ingest.get("llm_model"),
+            "llm_embedding": rss_ingest.get("llm_embedding"),
+            "sqlite_path": rss_ingest.get("sqlite_path"),
+        },
+    }
+
+
 def _get_task_logger() -> logging.Logger:
     """実行コンテキストに応じたロガーを返す。
 
@@ -604,7 +635,7 @@ def fetch_feed_task(feed_url: str) -> list[str]:
         feed_xml = response.read()
 
     links = _extract_links_from_feed_xml(feed_xml)
-    logger.debug("extracted links: feed_url=%s links=%s", feed_url, links)
+    logger.debug("rss feed fetched: feed_url=%s link_count=%d", feed_url, len(links))
     if len(links) == 0:
         raise ValueError(f"feed has no entries: {feed_url}")
 
@@ -628,6 +659,7 @@ def fetch_article_task(article_url: str) -> dict[str, Any]:
     外部依存リソース:
         HTTP記事ページ。
     """
+    logger = _get_task_logger()
     request = Request(
         article_url,
         headers={
@@ -635,24 +667,29 @@ def fetch_article_task(article_url: str) -> dict[str, Any]:
         },
     )
 
-    with urlopen(request, timeout=30) as response:
-        status = getattr(response, "status", 200)
-        if status != 200:
-            raise ValueError(f"unexpected status code: {status}")
+    try:
+        with urlopen(request, timeout=30) as response:
+            status = getattr(response, "status", 200)
+            if status != 200:
+                raise ValueError(f"unexpected status code: {status}")
 
-        raw_html = response.read()
-        content_type = response.headers.get_content_charset() or "utf-8"
+            raw_html = response.read()
+            content_type = response.headers.get_content_charset() or "utf-8"
 
-    article_html = raw_html.decode(content_type, errors="replace")
-    extracted = _extract_article_content_and_metadata(article_html)
-    extracted["url"] = article_url
-    extracted["id"] = _url_to_md5(article_url)
-    extracted["raw_html"] = article_html
-    extracted["fetch_timestamp"] = datetime.now(timezone.utc).isoformat()
-    metadata_published_timestamp = extracted.get("metadata", {}).get("published_timestamp")
-    if isinstance(metadata_published_timestamp, str):
-        extracted["published_timestamp"] = metadata_published_timestamp
-    return extracted
+        article_html = raw_html.decode(content_type, errors="replace")
+        logger.debug("article page fetched: url=%s page_length=%d", article_url, len(article_html))
+        extracted = _extract_article_content_and_metadata(article_html)
+        extracted["url"] = article_url
+        extracted["id"] = _url_to_md5(article_url)
+        extracted["raw_html"] = article_html
+        extracted["fetch_timestamp"] = datetime.now(timezone.utc).isoformat()
+        metadata_published_timestamp = extracted.get("metadata", {}).get("published_timestamp")
+        if isinstance(metadata_published_timestamp, str):
+            extracted["published_timestamp"] = metadata_published_timestamp
+        return extracted
+    except Exception as exc:
+        logger.warning("article page fetch failed: url=%s reason=%s", article_url, exc)
+        raise
 
 
 @task(name="store_to_s3_task")
@@ -676,6 +713,7 @@ def store_to_s3_task(article: dict[str, Any], storage: dict[str, Any], aws_crede
     """
     article_id = article["id"]
     object_key = _build_s3_object_key(storage["s3_prefix"], article_id)
+    logger = _get_task_logger()
 
     aws_credentials = AwsCredentials.load(aws_credentials_block_name)
     s3_client = _create_s3_client(aws_credentials)
@@ -685,6 +723,7 @@ def store_to_s3_task(article: dict[str, Any], storage: dict[str, Any], aws_crede
         Body=json.dumps(article, ensure_ascii=False).encode("utf-8"),
         ContentType="application/json",
     )
+    logger.info("article json stored to s3: path=s3://%s/%s", storage["s3_bucket"], object_key)
     return object_key
 
 
@@ -760,14 +799,14 @@ def summarize_briefing_task(article_content: str, ollama_connection: dict[str, s
     """
     logger = _get_task_logger()
     prompt = _build_briefing_prompt(article_content)
-    logger.debug("ollama briefing prompt: %s", prompt)
+    logger.debug("ollama request sent: prompt=%s", prompt)
     summary = invoke_ollama_generate(
         ollama_connection=ollama_connection,
         prompt=prompt,
         timeout_sec=timeout_sec,
         logger=logger,
     )
-    logger.debug("ollama briefing response: %s", summary)
+    logger.debug("ollama response received: response=%s", summary)
     if not summary:
         raise ValueError("Ollama response does not contain summary text")
     return summary
@@ -793,14 +832,14 @@ def summarize_one_sentence_task(article_content: str, ollama_connection: dict[st
     """
     logger = _get_task_logger()
     prompt = _build_one_sentence_prompt(article_content)
-    logger.debug("ollama one-sentence prompt: %s", prompt)
+    logger.debug("ollama request sent: prompt=%s", prompt)
     summary = invoke_ollama_generate(
         ollama_connection=ollama_connection,
         prompt=prompt,
         timeout_sec=timeout_sec,
         logger=logger,
     )
-    logger.debug("ollama one-sentence response: %s", summary)
+    logger.debug("ollama response received: response=%s", summary)
     if not summary:
         raise ValueError("Ollama response does not contain one sentence summary text")
     return summary
@@ -945,8 +984,10 @@ def load_config_task(config_path: str = "config.yaml") -> dict[str, Any]:
     外部依存リソース:
         ローカルファイルシステム。
     """
+    logger = _get_task_logger()
     config = _load_yaml_config(config_path)
     _validate_config(config)
+    logger.info("rss ingest config loaded: config=%s", _build_safe_config_snapshot(config))
     return config
 
 
@@ -967,20 +1008,13 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
     外部依存リソース:
         Prefect Blocks（AwsCredentials/Secret）。
     """
-    logger = get_run_logger()
-
-    rss_urls = config["rss_ingest"]["rss_urls"]
-    unique_count = len(set(rss_urls))
-    logger.info("rss_urls validation passed: total=%d unique=%d", len(rss_urls), unique_count)
-
     block_config = config["prefect_blocks"]
 
     aws_credentials_block = block_config["aws_credentials_block"]
     AwsCredentials.load(aws_credentials_block)
-    logger.info("Prefect block loaded: key=aws_credentials_block name=%s", aws_credentials_block)
 
     ollama_secret_block = block_config["ollama_connection_block"]
-    load_ollama_connection_secret(ollama_secret_block, logger=logger)
+    load_ollama_connection_secret(ollama_secret_block)
 
 
 @flow(name="rss_ingest_flow")
@@ -1019,26 +1053,24 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
         links = fetch_feed_task(feed_url)
         all_links.extend(links)
 
-    for link in all_links:
-        logger.debug("all_links record: %s", link)
+    logger.info("all rss feeds fetched: link_count=%d", len(all_links))
 
     unique_links = list(dict.fromkeys(all_links))
-    logger.info("feed links extracted: total=%d", len(all_links))
-    logger.info("feed links extracted: total=%d unique=%d", len(all_links), len(unique_links))
-
-    article_count = 0
-    stored_count = 0
-    skipped_existing_count = 0
+    deduplicated_links: list[str] = []
     for link in unique_links:
         embedding_lookup = check_embedding_record_exists_task(article_url=link, sqlite_path=sqlite_path)
-        if embedding_lookup["exists"]:
-            logger.info(
-                "article already exists in sqlite embeddings, skip fetch/summarize: id=%s url=%s",
-                embedding_lookup["id"],
-                link,
-            )
-            skipped_existing_count += 1
-            continue
+        if not embedding_lookup["exists"]:
+            deduplicated_links.append(link)
+
+    logger.info("deduplicated links prepared: link_count=%d", len(deduplicated_links))
+
+    for index, link in enumerate(deduplicated_links, start=1):
+        logger.info(
+            "page summarization started: progress=%d/%d url=%s",
+            index,
+            len(deduplicated_links),
+            link,
+        )
 
         try:
             article = fetch_and_summarize_article_flow(
@@ -1047,10 +1079,10 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
                 timeout_sec=ollama_timeout_sec,
             )
         except Exception as exc:
-            logger.warning("article fetch/summarize skipped: url=%s reason=%s", link, exc)
+            logger.info("page summarization skipped: url=%s reason=%s", link, exc)
             continue
 
-        object_key = store_to_s3_task(
+        store_to_s3_task(
             article=article,
             storage={
                 "s3_bucket": rss_ingest_config["s3_bucket"],
@@ -1058,19 +1090,6 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
             },
             aws_credentials_block_name=config["prefect_blocks"]["aws_credentials_block"],
         )
-
-        logger.debug(
-            "article fetched and stored: id=%s url=%s s3://%s/%s title=%s metadata=%s content_length=%d",
-            article["id"],
-            article["url"],
-            rss_ingest_config["s3_bucket"],
-            object_key,
-            article["title"],
-            article["metadata"],
-            len(article["content"]),
-        )
-        article_count += 1
-        stored_count += 1
         if isinstance(article.get("briefing_summary"), str) and article["briefing_summary"]:
             try:
                 upsert_briefing_embedding_to_sqlite_task(
@@ -1081,10 +1100,6 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
                 )
             except Exception as exc:
                 logger.warning("embedding upsert skipped: id=%s url=%s reason=%s", article.get("id"), article.get("url"), exc)
-
-    logger.info("article fetching completed: total=%d", article_count)
-    logger.info("article storing completed: total=%d", stored_count)
-    logger.info("article skipped by existing sqlite embedding record: total=%d", skipped_existing_count)
 
 
 @flow(name="fetch_summarize_url_flow")
