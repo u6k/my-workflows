@@ -157,16 +157,16 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
     aws_block = prefect_blocks.get("aws_credentials_block")
     if not isinstance(aws_block, str) or not aws_block:
         raise ValueError("config.prefect_blocks.aws_credentials_block must be a non-empty string")
-    ollama_block = prefect_blocks.get("ollama_connection_block")
-    if not isinstance(ollama_block, str) or not ollama_block:
-        raise ValueError("config.prefect_blocks.ollama_connection_block must be a non-empty string")
+    llm_block = prefect_blocks.get("llm_connection_block", prefect_blocks.get("ollama_connection_block"))
+    if not isinstance(llm_block, str) or not llm_block:
+        raise ValueError("config.prefect_blocks.llm_connection_block must be a non-empty string")
 
-    ollama = config.get("ollama")
-    if not isinstance(ollama, dict):
-        raise ValueError("config.ollama must be an object")
-    request_timeout_sec = ollama.get("request_timeout_sec")
+    llm_config = config.get("llm", config.get("ollama"))
+    if not isinstance(llm_config, dict):
+        raise ValueError("config.llm or config.ollama must be an object")
+    request_timeout_sec = llm_config.get("request_timeout_sec")
     if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
-        raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
+        raise ValueError("config.llm.request_timeout_sec must be a positive integer")
     digest_model = digest_config.get("llm_model")
     if not isinstance(digest_model, str) or not digest_model:
         raise ValueError("config.daily_news_blog_digest.llm_model must be a non-empty string")
@@ -812,7 +812,8 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
             max_categories=12,
             max_iterations=6,
         )
-        ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_block"])
+        llm_block_name = config["prefect_blocks"].get("llm_connection_block", config["prefect_blocks"].get("ollama_connection_block"))
+        ollama_secret = load_ollama_connection_secret(llm_block_name)
         ollama_connection = build_ollama_connection(
             ollama_secret,
             config["daily_news_blog_digest"]["llm_model"],
@@ -820,7 +821,7 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
         categories = summarize_each_category_task(
             categories=clusters,
             ollama_connection=ollama_connection,
-            timeout_sec=config.get("ollama", {}).get("request_timeout_sec", 120),
+            timeout_sec=config.get("llm", config.get("ollama", {})).get("request_timeout_sec", 120),
         )
         categories_key = save_categories_to_s3_task(
             target_date=parsed_target_date,
