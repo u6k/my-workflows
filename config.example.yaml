@@ -3,12 +3,12 @@ retry:
   initial_delay_sec: 2
   backoff_multiplier: 2
 
-ollama:
+llm:
   request_timeout_sec: 120
 
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
-  ollama_connection_block: ollama-connection
+  llm_connection_block: llm-connection
 
 rss_ingest:
   rss_urls:
@@ -16,13 +16,13 @@ rss_ingest:
     - https://another.example.org/feed
   s3_bucket: news-bucket
   s3_prefix: rss
-  llm_model: qwen3.5:0.8b
-  llm_embedding: nomic-embed-text
+  llm_model: ollama/qwen3.5:0.8b
+  llm_embedding: ollama/nomic-embed-text
   sqlite_path: .data/rss_embeddings.sqlite3
 
 daily_news_blog_digest:
   s3_bucket: news-bucket
   s3_prefix: daily-digest
-  llm_model: qwen3.5:0.8b
-  llm_embedding: nomic-embed-text
+  llm_model: ollama/qwen3.5:0.8b
+  llm_embedding: ollama/nomic-embed-text
   sqlite_path: .data/rss_embeddings.sqlite3

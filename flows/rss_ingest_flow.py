@@ -41,7 +41,6 @@ else:
 
 REQUIRED_PREFECT_BLOCK_KEYS = (
     "aws_credentials_block",
-    "ollama_connection_block",
 )
 BRIEFING_PROMPT_TEMPLATE = """以下のニュース記事から主要なテーマとアイデアを統合した包括的なブリーフィングドキュメントを作成してください。まずは、最も重要なポイントを簡潔にまとめたエグゼクティブサマリーから始めましょう。本文では、情報源に含まれる主要なテーマ、証拠、そして結論を​​詳細かつ徹底的に検証する必要があります。分析は、明瞭性を確保するために、見出しと箇条書きを用いて論理的に構成する必要があります。トーンは客観的かつ鋭いものでなければなりません。
 
@@ -131,6 +130,9 @@ def _validate_config(config: dict[str, Any]) -> None:
     if missing_block_keys:
         raise ValueError(f"config.prefect_blocks is missing required keys: {', '.join(missing_block_keys)}")
 
+    if "llm_connection_block" not in prefect_blocks and "ollama_connection_block" not in prefect_blocks:
+        raise ValueError("config.prefect_blocks must include llm_connection_block or ollama_connection_block")
+
     invalid_block_names = [
         key
         for key in REQUIRED_PREFECT_BLOCK_KEYS
@@ -139,13 +141,20 @@ def _validate_config(config: dict[str, Any]) -> None:
     if invalid_block_names:
         raise ValueError(f"config.prefect_blocks values must be non-empty strings: {', '.join(invalid_block_names)}")
 
-    ollama = config.get("ollama")
-    if not isinstance(ollama, dict):
-        raise ValueError("config.ollama must be an object")
+    llm_block_name = prefect_blocks.get("llm_connection_block", prefect_blocks.get("ollama_connection_block"))
+    if not isinstance(llm_block_name, str) or not llm_block_name:
+        raise ValueError("config.prefect_blocks.llm_connection_block must be a non-empty string")
 
-    request_timeout_sec = ollama.get("request_timeout_sec")
+    llm_config = config.get("llm")
+    ollama = config.get("ollama")
+    if llm_config is None:
+        llm_config = ollama
+    if not isinstance(llm_config, dict):
+        raise ValueError("config.llm or config.ollama must be an object")
+
+    request_timeout_sec = llm_config.get("request_timeout_sec")
     if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
-        raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
+        raise ValueError("config.llm.request_timeout_sec must be a positive integer")
 
     rss_ingest_model = rss_ingest.get("llm_model")
     if not isinstance(rss_ingest_model, str) or not rss_ingest_model:
@@ -162,7 +171,7 @@ def _build_safe_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     """ログ出力用の非機密設定スナップショットを返す。"""
     rss_ingest = config.get("rss_ingest", {})
     retry = config.get("retry", {})
-    ollama = config.get("ollama", {})
+    llm_config = config.get("llm", config.get("ollama", {}))
     prefect_blocks = config.get("prefect_blocks", {})
 
     return {
@@ -171,12 +180,12 @@ def _build_safe_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
             "initial_delay_sec": retry.get("initial_delay_sec"),
             "backoff_multiplier": retry.get("backoff_multiplier"),
         },
-        "ollama": {
-            "request_timeout_sec": ollama.get("request_timeout_sec"),
+        "llm": {
+            "request_timeout_sec": llm_config.get("request_timeout_sec"),
         },
         "prefect_blocks": {
             "aws_credentials_block": prefect_blocks.get("aws_credentials_block"),
-            "ollama_connection_block": prefect_blocks.get("ollama_connection_block"),
+            "llm_connection_block": prefect_blocks.get("llm_connection_block", prefect_blocks.get("ollama_connection_block")),
         },
         "rss_ingest": {
             "rss_urls": rss_ingest.get("rss_urls"),
@@ -1013,7 +1022,7 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
     aws_credentials_block = block_config["aws_credentials_block"]
     AwsCredentials.load(aws_credentials_block)
 
-    ollama_secret_block = block_config["ollama_connection_block"]
+    ollama_secret_block = block_config.get("llm_connection_block", block_config.get("ollama_connection_block"))
     load_ollama_connection_secret(ollama_secret_block)
 
 
@@ -1037,14 +1046,15 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
 
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
-    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_block"])
+    llm_block_name = config["prefect_blocks"].get("llm_connection_block", config["prefect_blocks"].get("ollama_connection_block"))
+    ollama_secret = load_ollama_connection_secret(llm_block_name)
     rss_ingest_config = config["rss_ingest"]
     ollama_connection = build_ollama_connection(ollama_secret, rss_ingest_config["llm_model"])
     embedding_model = rss_ingest_config.get("llm_embedding")
     if not isinstance(embedding_model, str) or not embedding_model:
         raise ValueError("config.rss_ingest.llm_embedding must be a non-empty string")
     embedding_connection = build_ollama_connection(ollama_secret, embedding_model)
-    ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
+    llm_timeout_sec = config.get("llm", config.get("ollama", {})).get("request_timeout_sec", 120)
     sqlite_path = rss_ingest_config["sqlite_path"]
     _initialize_embeddings_sqlite(sqlite_path)
 
@@ -1076,7 +1086,7 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
             article = fetch_and_summarize_article_flow(
                 article_url=link,
                 ollama_connection=ollama_connection,
-                timeout_sec=ollama_timeout_sec,
+                timeout_sec=llm_timeout_sec,
             )
         except Exception as exc:
             logger.info("page summarization skipped: url=%s reason=%s", link, exc)
@@ -1096,7 +1106,7 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
                     article=article,
                     embedding_connection=embedding_connection,
                     sqlite_path=sqlite_path,
-                    timeout_sec=ollama_timeout_sec,
+                    timeout_sec=llm_timeout_sec,
                 )
             except Exception as exc:
                 logger.warning("embedding upsert skipped: id=%s url=%s reason=%s", article.get("id"), article.get("url"), exc)
@@ -1126,9 +1136,10 @@ def fetch_summarize_url_flow(article_url: str, config_path: str = "config.yaml")
     logger = _get_task_logger()
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
-    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_block"])
+    llm_block_name = config["prefect_blocks"].get("llm_connection_block", config["prefect_blocks"].get("ollama_connection_block"))
+    ollama_secret = load_ollama_connection_secret(llm_block_name)
     ollama_connection = build_ollama_connection(ollama_secret, config["rss_ingest"]["llm_model"])
-    ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
+    ollama_timeout_sec = config.get("llm", config.get("ollama", {})).get("request_timeout_sec", 120)
 
     article = fetch_and_summarize_article_flow(
         article_url=article_url,
