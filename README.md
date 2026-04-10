@@ -52,6 +52,10 @@ cp config.example.yaml config.yaml
 - `rss_ingest.s3_prefix`: S3 保存プレフィックス
 - 既存オブジェクト判定: `s3://{s3_bucket}/{s3_prefix}/{urlのmd5先頭2文字}/{urlのmd5}.json` が存在する記事は再取得せずスキップ
 - 保存JSON: Trafilatura による本文抽出結果 `content` と、生HTML `raw_html` の両方を保持
+- YouTube URL は `markitdown[youtube-transcription]` の Python API で処理し、`youtube_transcript_languages=["ja", "en"]` を指定して日本語字幕を優先取得する
+- YouTube URL の `content` には `markitdown` が返す Markdown 全文を保持し、`### Transcript` セクションを含む動画文字起こしを後続の要約に利用する
+- YouTube URL で `### Transcript` セクションを取得できない場合は、説明文やメタデータだけで成功扱いにせずエラーとして扱う
+- YouTube 文字起こし処理は Python API 専用で、CLI フォールバックは行わない
 - LiteLLM 要約: `briefing_summary` と `one_sentence_summary` を本文から生成して保存
 - `llm.request_timeout_sec`: LLM API呼び出しタイムアウト秒（省略時120秒）
 - `rss_ingest.llm_model`: `rss_ingest_flow` で使うモデル名
@@ -240,6 +244,8 @@ uv run python flows/daily_news_blog_digest_flow.py --target-date 2026-04-02 --co
 uv run python -c "from flows.rss_ingest_flow import fetch_summarize_url_flow; import json; result = fetch_summarize_url_flow('https://example.com/article', config_path='config.yaml'); print(json.dumps(result, ensure_ascii=False, indent=2))"
 ```
 
+YouTube URL を単一要約フローへ渡す場合も同じフローを利用できます。YouTube のときは `markitdown[youtube-transcription]` が必要で、字幕が取得できない動画は失敗として返ります。
+
 返り値には少なくとも次の項目が含まれます。
 
 - `id`
@@ -303,3 +309,8 @@ uv run prefect deployment run "daily-news-blog-digest-flow/daily-news-blog-diges
   - スケジューラ側で毎日の `target_date` を明示設定し、必要なときだけ Run 画面で上書き
 - 「この deployment は常に前日分を対象にしたい」  
   - deployment 側のデフォルト Parameters を設定し、例外時だけ手動実行で上書き
+
+## 開発ルール
+
+- Docstring の書式は [docs/docstring_style.md](docs/docstring_style.md) に統一ルールを定義しています。
+- 追加・変更する関数、メソッド、クラスの docstring は上記ルールに従い、少なくとも `目的` `処理内容` `入力` `出力` `例外` を必ず記載してください。

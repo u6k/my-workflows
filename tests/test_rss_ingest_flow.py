@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -402,6 +403,96 @@ def test_fetch_article_task_returns_content_and_metadata(
     assert "<html>" in article["raw_html"]
     assert article["metadata"]["author"] == "Jane Doe"
     assert article["metadata"]["tags"] == ["ai", "python", "tech"]
+
+
+def test_is_youtube_url_supports_common_hosts() -> None:
+    assert rss_ingest_flow._is_youtube_url("https://www.youtube.com/watch?v=abc123") is True
+    assert rss_ingest_flow._is_youtube_url("https://youtu.be/abc123") is True
+    assert rss_ingest_flow._is_youtube_url("https://example.com/watch?v=abc123") is False
+
+
+def test_extract_title_from_markdown_text_prefers_heading() -> None:
+    title = rss_ingest_flow._extract_title_from_markdown_text("\n# Video title\n\n本文")
+    assert title == "Video title"
+
+
+def test_extract_transcript_section_returns_transcript_body() -> None:
+    transcript = rss_ingest_flow._extract_transcript_section(
+        "# YouTube\n\n## Video title\n\n### Description\n概要\n\n### Transcript\n字幕本文です\n\n### Video Metadata\nx"
+    )
+    assert transcript == "字幕本文です"
+
+
+@patch("flows.rss_ingest_flow._fetch_youtube_transcript_with_markitdown")
+def test_fetch_article_task_uses_markitdown_for_youtube_urls(
+    mock_fetch_youtube_transcript_with_markitdown: MagicMock,
+) -> None:
+    mock_fetch_youtube_transcript_with_markitdown.return_value = {
+        "title": "Video title",
+        "content": "# YouTube\n\n## Video title\n\n### Transcript\nTranscript body",
+        "metadata": {
+            "source_type": "youtube_transcript",
+            "transcript_provider": "markitdown",
+            "transcript_language_priority": ["ja", "en"],
+        },
+        "raw_html": "",
+    }
+
+    article = rss_ingest_flow.fetch_article_task.fn("https://www.youtube.com/watch?v=abc123")
+
+    assert article["url"] == "https://www.youtube.com/watch?v=abc123"
+    assert article["title"] == "Video title"
+    assert "### Transcript\nTranscript body" in article["content"]
+    assert article["raw_html"] == ""
+    assert article["metadata"]["source_type"] == "youtube_transcript"
+    mock_fetch_youtube_transcript_with_markitdown.assert_called_once_with("https://www.youtube.com/watch?v=abc123")
+
+
+def test_fetch_youtube_transcript_with_markitdown_uses_language_priority() -> None:
+    mock_markitdown = MagicMock()
+    mock_markitdown.return_value.convert.return_value.text_content = (
+        "# YouTube\n\n## Video title\n\n### Transcript\nTranscript body"
+    )
+    fake_module = MagicMock()
+    fake_module.MarkItDown = mock_markitdown
+
+    with patch.dict("sys.modules", {"markitdown": fake_module}):
+        article = rss_ingest_flow._fetch_youtube_transcript_with_markitdown("https://youtu.be/abc123")
+
+    assert article["title"] == "Video title"
+    assert "### Transcript\nTranscript body" in article["content"]
+    assert article["metadata"]["transcript_provider"] == "markitdown"
+    assert article["metadata"]["transcript_language_priority"] == ["ja", "en"]
+    mock_markitdown.return_value.convert.assert_called_once_with(
+        "https://youtu.be/abc123",
+        youtube_transcript_languages=["ja", "en"],
+    )
+
+
+def test_fetch_youtube_transcript_with_markitdown_raises_when_transcript_missing() -> None:
+    mock_markitdown = MagicMock()
+    mock_markitdown.return_value.convert.return_value.text_content = (
+        "# YouTube\n\n## Video title\n\n### Description\nSummary only"
+    )
+    fake_module = MagicMock()
+    fake_module.MarkItDown = mock_markitdown
+
+    with patch.dict("sys.modules", {"markitdown": fake_module}):
+        with pytest.raises(ValueError, match="YouTube transcript section"):
+            rss_ingest_flow._fetch_youtube_transcript_with_markitdown("https://youtu.be/abc123")
+
+
+def test_fetch_youtube_transcript_with_markitdown_raises_when_markitdown_is_missing() -> None:
+    original_import = __import__
+
+    def side_effect(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "markitdown":
+            raise ImportError("markitdown is not installed")
+        return original_import(name, globals, locals, fromlist, level)
+
+    with patch("builtins.__import__", side_effect=side_effect):
+        with pytest.raises(ValueError, match="markitdown Python package"):
+            rss_ingest_flow._fetch_youtube_transcript_with_markitdown("https://youtu.be/abc123")
 
 
 @patch("flows.rss_ingest_flow.trafilatura.extract")
