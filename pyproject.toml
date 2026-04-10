@@ -4,11 +4,14 @@ version = "0.1.0"
 description = "daily life workflows"
 requires-python = ">=3.10"
 dependencies = [
-  "prefect",
-  "prefect-aws",
-  "pyyaml",
-  "pytest",
-  "trafilatura",
+  "fakeredis<2.35",
+  "markitdown[youtube-transcription]==0.1.5",
+  "litellm==1.83.4",
+  "prefect==3.6.25",
+  "prefect-aws==0.7.7",
+  "pyyaml==6.0.3",
+  "pytest==9.0.3",
+  "trafilatura==2.0.0",
 ]
 
 [tool.uv]

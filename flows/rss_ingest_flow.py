@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import hashlib
 import json
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -38,10 +39,8 @@ else:
         load_yaml_config,
     )
 
-
 REQUIRED_PREFECT_BLOCK_KEYS = (
     "aws_credentials_block",
-    "ollama_connection_block",
 )
 BRIEFING_PROMPT_TEMPLATE = """以下のニュース記事から主要なテーマとアイデアを統合した包括的なブリーフィングドキュメントを作成してください。まずは、最も重要なポイントを簡潔にまとめたエグゼクティブサマリーから始めましょう。本文では、情報源に含まれる主要なテーマ、証拠、そして結論を​​詳細かつ徹底的に検証する必要があります。分析は、明瞭性を確保するために、見出しと箇条書きを用いて論理的に構成する必要があります。トーンは客観的かつ鋭いものでなければなりません。
 
@@ -131,6 +130,9 @@ def _validate_config(config: dict[str, Any]) -> None:
     if missing_block_keys:
         raise ValueError(f"config.prefect_blocks is missing required keys: {', '.join(missing_block_keys)}")
 
+    if "llm_connection_block" not in prefect_blocks and "ollama_connection_block" not in prefect_blocks:
+        raise ValueError("config.prefect_blocks must include llm_connection_block or ollama_connection_block")
+
     invalid_block_names = [
         key
         for key in REQUIRED_PREFECT_BLOCK_KEYS
@@ -139,13 +141,20 @@ def _validate_config(config: dict[str, Any]) -> None:
     if invalid_block_names:
         raise ValueError(f"config.prefect_blocks values must be non-empty strings: {', '.join(invalid_block_names)}")
 
-    ollama = config.get("ollama")
-    if not isinstance(ollama, dict):
-        raise ValueError("config.ollama must be an object")
+    llm_block_name = prefect_blocks.get("llm_connection_block", prefect_blocks.get("ollama_connection_block"))
+    if not isinstance(llm_block_name, str) or not llm_block_name:
+        raise ValueError("config.prefect_blocks.llm_connection_block must be a non-empty string")
 
-    request_timeout_sec = ollama.get("request_timeout_sec")
+    llm_config = config.get("llm")
+    ollama = config.get("ollama")
+    if llm_config is None:
+        llm_config = ollama
+    if not isinstance(llm_config, dict):
+        raise ValueError("config.llm or config.ollama must be an object")
+
+    request_timeout_sec = llm_config.get("request_timeout_sec")
     if request_timeout_sec is not None and (not isinstance(request_timeout_sec, int) or request_timeout_sec <= 0):
-        raise ValueError("config.ollama.request_timeout_sec must be a positive integer")
+        raise ValueError("config.llm.request_timeout_sec must be a positive integer")
 
     rss_ingest_model = rss_ingest.get("llm_model")
     if not isinstance(rss_ingest_model, str) or not rss_ingest_model:
@@ -159,10 +168,25 @@ def _validate_config(config: dict[str, Any]) -> None:
 
 
 def _build_safe_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
-    """ログ出力用の非機密設定スナップショットを返す。"""
+    """ログ出力用の非機密設定スナップショットを返す。
+
+    目的:
+        機密値を除いた設定内容だけを安全にログへ残せるようにする。
+    処理内容:
+        RSS ingest、retry、llm、Prefect block の主要設定を抽出し、
+        シークレット値を含まない辞書へ整形して返す。
+    入力:
+        config: 元の設定辞書。
+    出力:
+        dict[str, Any]: ログ出力向けに整形した非機密設定スナップショット。
+    例外:
+        なし。
+    外部依存リソース:
+        なし。
+    """
     rss_ingest = config.get("rss_ingest", {})
     retry = config.get("retry", {})
-    ollama = config.get("ollama", {})
+    llm_config = config.get("llm", config.get("ollama", {}))
     prefect_blocks = config.get("prefect_blocks", {})
 
     return {
@@ -171,12 +195,12 @@ def _build_safe_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
             "initial_delay_sec": retry.get("initial_delay_sec"),
             "backoff_multiplier": retry.get("backoff_multiplier"),
         },
-        "ollama": {
-            "request_timeout_sec": ollama.get("request_timeout_sec"),
+        "llm": {
+            "request_timeout_sec": llm_config.get("request_timeout_sec"),
         },
         "prefect_blocks": {
             "aws_credentials_block": prefect_blocks.get("aws_credentials_block"),
-            "ollama_connection_block": prefect_blocks.get("ollama_connection_block"),
+            "llm_connection_block": prefect_blocks.get("llm_connection_block", prefect_blocks.get("ollama_connection_block")),
         },
         "rss_ingest": {
             "rss_urls": rss_ingest.get("rss_urls"),
@@ -251,6 +275,35 @@ def _normalize_extracted_link(link: str) -> str:
     return query.get("url", [link])[0]
 
 
+def _is_youtube_url(url: str) -> bool:
+    """URLがYouTube動画系URLかどうかを判定する。
+
+    目的:
+        通常の記事 HTML 抽出と YouTube 文字起こし取得の分岐条件を提供する。
+    処理内容:
+        URL をパースしてホスト名を正規化し、`youtube.com` 系および
+        `youtu.be` 系の既知ホストに一致するかを判定する。
+    入力:
+        url: 判定対象URL。
+    出力:
+        bool: YouTube動画系URLなら `True`、それ以外は `False`。
+    例外:
+        なし。URL パース失敗時も `False` を返す。
+    外部依存リソース:
+        なし。
+    """
+    try:
+        hostname = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+
+    if hostname in {"youtu.be", "www.youtu.be"}:
+        return True
+    if hostname in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+        return True
+    return False
+
+
 def _url_to_md5(url: str) -> str:
     """URLから記事識別用のMD5ハッシュを生成する。
 
@@ -266,6 +319,120 @@ def _url_to_md5(url: str) -> str:
         なし。
     """
     return hashlib.md5(url.encode("utf-8")).hexdigest()
+
+
+def _extract_title_from_markdown_text(markdown_text: str) -> str:
+    """Markdown 先頭からタイトル候補を抽出する。
+
+    目的:
+        `markitdown` の YouTube 変換結果から要約表示用タイトルを補完する。
+    処理内容:
+        先頭の空行を除去したうえで、YouTube 出力の `# YouTube` ヘッダを考慮し、
+        続く `## ` 見出しを優先してタイトル候補を返す。通常の Markdown では
+        最初の見出しか先頭行をタイトルとして返す。
+    入力:
+        markdown_text: `markitdown` が返した Markdown 全文。
+    出力:
+        str: 抽出したタイトル候補。見つからない場合は空文字列。
+    例外:
+        なし。
+    外部依存リソース:
+        なし。
+    """
+    lines = [line.strip() for line in markdown_text.splitlines() if line.strip()]
+    if lines and lines[0] == "# YouTube":
+        for line in lines[1:]:
+            if line.startswith("## "):
+                return line[3:].strip()
+
+    for line in lines:
+        if line.startswith("#"):
+            return line.lstrip("#").strip()
+        return line
+    return ""
+
+
+def _extract_transcript_section(markdown_text: str) -> str:
+    """`markitdown` の YouTube 出力から Transcript セクション本文を抽出する。
+
+    目的:
+        概要情報だけでなく、実際の動画字幕が取得できたかを判定できるようにする。
+    処理内容:
+        `### Transcript` 見出しから次の見出しまたは文末までを正規表現で切り出し、
+        前後空白を除去して返す。
+    入力:
+        markdown_text: `markitdown` が返した Markdown 全文。
+    出力:
+        str: Transcript セクション本文。存在しない場合は空文字列。
+    例外:
+        なし。
+    外部依存リソース:
+        なし。
+    """
+    match = re.search(
+        r"(?:^|\n)### Transcript\s*\n(?P<body>.*?)(?:\n### |\n## |\Z)",
+        markdown_text,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        return ""
+    return match.group("body").strip()
+
+
+def _fetch_youtube_transcript_with_markitdown(article_url: str, timeout_sec: int = 120) -> dict[str, Any]:
+    """`markitdown` Python API で YouTube 文字起こし付き記事辞書を生成する。
+
+    目的:
+        YouTube URL から字幕本文を取得し、通常記事と同じ要約パイプラインへ渡せる
+        記事辞書形式へ正規化する。
+    処理内容:
+        `markitdown[youtube-transcription]` の Python API を読み込み、
+        `youtube_transcript_languages=["ja", "en"]` を指定して変換する。
+        返却された Markdown 全文からタイトル候補を抽出し、`### Transcript`
+        セクションの存在を検証したうえで、`content` `metadata` `raw_html`
+        を含む記事辞書を構築する。
+    入力:
+        article_url: 文字起こし取得対象の YouTube URL。
+        timeout_sec: 互換性維持のため受け取る未使用引数。
+    出力:
+        dict[str, Any]: `title` `content` `metadata` `raw_html` を含む記事辞書。
+    例外:
+        ValueError: `markitdown` の YouTube 対応依存が未導入の場合。
+        ValueError: `markitdown` の返却値が空、または `### Transcript` セクションを含まない場合。
+        markitdown 由来例外: 変換処理自体が失敗した場合。
+    外部依存リソース:
+        markitdown Python パッケージ、YouTube 字幕取得依存。
+    """
+    _ = timeout_sec
+    try:
+        from markitdown import MarkItDown  # type: ignore
+    except ImportError as exc:
+        raise ValueError(
+            "markitdown Python package with youtube-transcription support is required for YouTube transcripts"
+        ) from exc
+
+    result = MarkItDown().convert(
+        article_url,
+        youtube_transcript_languages=["ja", "en"],
+    )
+    markdown_text = str(getattr(result, "text_content", "") or "").strip()
+
+    if not markdown_text:
+        raise ValueError("markitdown returned empty transcript")
+    transcript_text = _extract_transcript_section(markdown_text)
+    if not transcript_text:
+        raise ValueError("markitdown did not return a YouTube transcript section")
+
+    return {
+        "title": _extract_title_from_markdown_text(markdown_text),
+        "content": markdown_text,
+        "metadata": {
+            "source_type": "youtube_transcript",
+            "transcript_provider": "markitdown",
+            "transcript_language_priority": ["ja", "en"],
+        },
+        "raw_html": "",
+    }
 
 
 def _build_s3_object_key(s3_prefix: str, article_id: str) -> str:
@@ -644,22 +811,41 @@ def fetch_feed_task(feed_url: str) -> list[str]:
 
 @task(name="fetch_article_task")
 def fetch_article_task(article_url: str) -> dict[str, Any]:
-    """記事URLからHTMLを取得し、本文抽出結果を返す。
+    """URL から要約対象本文を取得し、記事辞書へ正規化して返す。
 
+    目的:
+        記事ページと YouTube 動画を共通の後続要約処理へ流せるように、
+        URL 種別ごとの差異を吸収した記事辞書を生成する。
     処理内容:
-        User-Agent付きリクエストで記事ページを取得し、ステータス検証後にHTMLをデコードして
-        本文/メタ抽出を行い、URL・ID・raw_htmlを付与して返す。
+        URL が YouTube の場合は `markitdown` Python API を使って字幕付き
+        Markdown を取得し、`### Transcript` セクションを含むことを検証したうえで
+        記事辞書を返す。通常の HTTP 記事 URL の場合は HTML を取得し、
+        `trafilatura` と HTML パーサーで本文・タイトル・メタデータを抽出して返す。
+        どちらの経路でも `url` `id` `fetch_timestamp` を付与する。
     入力:
-        article_url: 記事URL。
+        article_url: 取得対象の記事 URL または YouTube URL。
     出力:
-        dict[str, Any]: 抽出結果を含む記事辞書。
+        dict[str, Any]: `id` `url` `title` `content` `metadata` `raw_html` を含む記事辞書。
     例外:
-        ValueError: HTTPステータスが200以外の場合。
-        URLError/HTTPError: 通信失敗時。
+        ValueError: YouTube 字幕が取得できない場合、HTTP ステータスが 200 以外の場合、または本文抽出結果が不正な場合。
+        URLError/HTTPError: 通常記事の通信失敗時。
+        その他抽出処理由来例外: HTML 解析や `markitdown` 変換に失敗した場合。
     外部依存リソース:
-        HTTP記事ページ。
+        HTTP 記事ページ、markitdown Python パッケージ、YouTube 字幕取得依存。
     """
     logger = _get_task_logger()
+    if _is_youtube_url(article_url):
+        transcript_article = _fetch_youtube_transcript_with_markitdown(article_url)
+        transcript_article["url"] = article_url
+        transcript_article["id"] = _url_to_md5(article_url)
+        transcript_article["fetch_timestamp"] = datetime.now(timezone.utc).isoformat()
+        logger.debug(
+            "youtube transcript fetched via markitdown: url=%s content_length=%d",
+            article_url,
+            len(transcript_article["content"]),
+        )
+        return transcript_article
+
     request = Request(
         article_url,
         headers={
@@ -1013,7 +1199,7 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
     aws_credentials_block = block_config["aws_credentials_block"]
     AwsCredentials.load(aws_credentials_block)
 
-    ollama_secret_block = block_config["ollama_connection_block"]
+    ollama_secret_block = block_config.get("llm_connection_block", block_config.get("ollama_connection_block"))
     load_ollama_connection_secret(ollama_secret_block)
 
 
@@ -1037,14 +1223,15 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
 
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
-    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_block"])
+    llm_block_name = config["prefect_blocks"].get("llm_connection_block", config["prefect_blocks"].get("ollama_connection_block"))
+    ollama_secret = load_ollama_connection_secret(llm_block_name)
     rss_ingest_config = config["rss_ingest"]
     ollama_connection = build_ollama_connection(ollama_secret, rss_ingest_config["llm_model"])
     embedding_model = rss_ingest_config.get("llm_embedding")
     if not isinstance(embedding_model, str) or not embedding_model:
         raise ValueError("config.rss_ingest.llm_embedding must be a non-empty string")
     embedding_connection = build_ollama_connection(ollama_secret, embedding_model)
-    ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
+    llm_timeout_sec = config.get("llm", config.get("ollama", {})).get("request_timeout_sec", 120)
     sqlite_path = rss_ingest_config["sqlite_path"]
     _initialize_embeddings_sqlite(sqlite_path)
 
@@ -1076,7 +1263,7 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
             article = fetch_and_summarize_article_flow(
                 article_url=link,
                 ollama_connection=ollama_connection,
-                timeout_sec=ollama_timeout_sec,
+                timeout_sec=llm_timeout_sec,
             )
         except Exception as exc:
             logger.info("page summarization skipped: url=%s reason=%s", link, exc)
@@ -1096,7 +1283,7 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
                     article=article,
                     embedding_connection=embedding_connection,
                     sqlite_path=sqlite_path,
-                    timeout_sec=ollama_timeout_sec,
+                    timeout_sec=llm_timeout_sec,
                 )
             except Exception as exc:
                 logger.warning("embedding upsert skipped: id=%s url=%s reason=%s", article.get("id"), article.get("url"), exc)
@@ -1126,9 +1313,10 @@ def fetch_summarize_url_flow(article_url: str, config_path: str = "config.yaml")
     logger = _get_task_logger()
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
-    ollama_secret = load_ollama_connection_secret(config["prefect_blocks"]["ollama_connection_block"])
+    llm_block_name = config["prefect_blocks"].get("llm_connection_block", config["prefect_blocks"].get("ollama_connection_block"))
+    ollama_secret = load_ollama_connection_secret(llm_block_name)
     ollama_connection = build_ollama_connection(ollama_secret, config["rss_ingest"]["llm_model"])
-    ollama_timeout_sec = config.get("ollama", {}).get("request_timeout_sec", 120)
+    ollama_timeout_sec = config.get("llm", config.get("ollama", {})).get("request_timeout_sec", 120)
 
     article = fetch_and_summarize_article_flow(
         article_url=article_url,
