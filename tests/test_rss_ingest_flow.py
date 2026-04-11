@@ -676,11 +676,11 @@ def test_fetch_article_task_raises_when_status_is_not_200(mock_urlopen: MagicMoc
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
 @patch("flows.rss_ingest_flow._get_embeddings_collection")
-@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
+@patch("flows.rss_ingest_flow.load_llm_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_continues_when_article_fetch_fails(
     mock_load_config_task: MagicMock,
-    mock_load_ollama_connection_secret: MagicMock,
+    mock_load_llm_connection_secret: MagicMock,
     mock_get_embeddings_collection: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
@@ -703,7 +703,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
             "llm_connection_block": "llm-connection",
         },
     }
-    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_load_llm_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_get_embeddings_collection.return_value = FakeCollection()
     mock_fetch_feed_task.return_value = ["https://example.com/a", "https://example.com/b"]
     mock_check_embedding_record_exists_task.side_effect = [
@@ -738,11 +738,11 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
 @patch("flows.rss_ingest_flow._get_embeddings_collection")
-@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
+@patch("flows.rss_ingest_flow.load_llm_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exception(
     mock_load_config_task: MagicMock,
-    mock_load_ollama_connection_secret: MagicMock,
+    mock_load_llm_connection_secret: MagicMock,
     mock_get_embeddings_collection: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
@@ -765,7 +765,7 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
             "llm_connection_block": "llm-connection",
         },
     }
-    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_load_llm_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_get_embeddings_collection.return_value = FakeCollection()
     mock_fetch_feed_task.return_value = ["https://example.com/a", "https://example.com/b"]
     mock_check_embedding_record_exists_task.side_effect = [
@@ -798,11 +798,11 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
 @patch("flows.rss_ingest_flow._get_embeddings_collection")
-@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
+@patch("flows.rss_ingest_flow.load_llm_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
     mock_load_config_task: MagicMock,
-    mock_load_ollama_connection_secret: MagicMock,
+    mock_load_llm_connection_secret: MagicMock,
     mock_get_embeddings_collection: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
@@ -825,7 +825,7 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
             "llm_connection_block": "llm-connection",
         },
     }
-    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_load_llm_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_get_embeddings_collection.return_value = FakeCollection()
     mock_fetch_feed_task.return_value = ["https://example.com/a"]
     mock_check_embedding_record_exists_task.return_value = {"exists": True, "id": "aaaa"}
@@ -847,11 +847,11 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
 @patch("flows.rss_ingest_flow._get_embeddings_collection")
-@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
+@patch("flows.rss_ingest_flow.load_llm_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_skips_article_when_summarization_fails(
     mock_load_config_task: MagicMock,
-    mock_load_ollama_connection_secret: MagicMock,
+    mock_load_llm_connection_secret: MagicMock,
     mock_get_embeddings_collection: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
@@ -874,7 +874,7 @@ def test_rss_ingest_flow_skips_article_when_summarization_fails(
             "llm_connection_block": "llm-connection",
         },
     }
-    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_load_llm_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
     mock_get_embeddings_collection.return_value = FakeCollection()
     mock_fetch_feed_task.return_value = ["https://example.com/a"]
     mock_check_embedding_record_exists_task.return_value = {"exists": False, "id": "aaaa"}
@@ -913,11 +913,11 @@ def test_normalize_extracted_link_extracts_google_redirect_url() -> None:
 
 @patch("flows.rss_ingest_flow.fetch_and_summarize_article_flow")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
-@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
+@patch("flows.rss_ingest_flow.load_llm_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_fetch_summarize_url_flow_returns_article_with_summaries(
     mock_load_config_task: MagicMock,
-    mock_load_ollama_connection_secret: MagicMock,
+    mock_load_llm_connection_secret: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_and_summarize_article_flow: MagicMock,
 ) -> None:
@@ -936,7 +936,7 @@ def test_fetch_summarize_url_flow_returns_article_with_summaries(
             "llm_connection_block": "llm-connection",
         },
     }
-    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434"}
+    mock_load_llm_connection_secret.return_value = {"base_url": "http://localhost:11434"}
     mock_fetch_and_summarize_article_flow.return_value = {
         "id": "aaaa",
         "url": "https://example.com/a",
