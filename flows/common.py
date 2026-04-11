@@ -261,6 +261,79 @@ def load_llm_connection_secret(secret_block_name: str, logger: logging.Logger | 
     return validate_llm_connection(llm_secret_value)
 
 
+def validate_chroma_config(chroma_config: Any) -> dict[str, Any]:
+    """Chroma HTTP 接続設定を検証して正規化する。
+
+    処理内容:
+        `host`, `port`, `ssl`, `collection_name` を持つ辞書かどうかを確認し、
+        空白除去済みの値で返す。
+    入力:
+        chroma_config: 検証対象の Chroma 設定。
+    出力:
+        dict[str, Any]: 正規化済み Chroma 設定。
+    例外:
+        ValueError: 型不正、必須キー不足、値不正がある場合。
+    外部依存リソース:
+        なし。
+    """
+    if not isinstance(chroma_config, dict):
+        raise ValueError("config.chroma must be an object")
+
+    host = chroma_config.get("host")
+    if not isinstance(host, str) or not host.strip():
+        raise ValueError("config.chroma.host must be a non-empty string")
+
+    port = chroma_config.get("port")
+    if not isinstance(port, int) or port <= 0:
+        raise ValueError("config.chroma.port must be a positive integer")
+
+    ssl = chroma_config.get("ssl")
+    if not isinstance(ssl, bool):
+        raise ValueError("config.chroma.ssl must be a boolean")
+
+    collection_name = chroma_config.get("collection_name")
+    if not isinstance(collection_name, str) or not collection_name.strip():
+        raise ValueError("config.chroma.collection_name must be a non-empty string")
+
+    return {
+        "host": host.strip(),
+        "port": port,
+        "ssl": ssl,
+        "collection_name": collection_name.strip(),
+    }
+
+
+def get_chroma_collection(chroma_config: dict[str, Any]) -> Any:
+    """HTTP 接続で Chroma collection を取得する。
+
+    処理内容:
+        `HttpClient(host=..., port=..., ssl=...)` から collection を
+        `get_or_create_collection()` で取得する。
+    入力:
+        chroma_config: Chroma HTTP 接続設定。
+    出力:
+        Any: Chroma collection オブジェクト。
+    例外:
+        ValueError: 入力設定が不正な場合。
+        RuntimeError: chromadb 未インストール時。
+    外部依存リソース:
+        ChromaDB HTTP サーバー。
+    """
+    normalized_config = validate_chroma_config(chroma_config)
+
+    try:
+        import chromadb
+    except ImportError as exc:
+        raise RuntimeError("chromadb is required. Install project dependencies with `uv sync`.") from exc
+
+    client = chromadb.HttpClient(
+        host=normalized_config["host"],
+        port=normalized_config["port"],
+        ssl=normalized_config["ssl"],
+    )
+    return client.get_or_create_collection(name=normalized_config["collection_name"])
+
+
 def _get_litellm_functions() -> tuple[Any, Any]:
     """LiteLLMの呼び出し関数を遅延importして返す。"""
     try:
