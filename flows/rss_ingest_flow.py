@@ -50,14 +50,14 @@ REQUIRED_PREFECT_BLOCK_KEYS = (
 BRIEFING_PROMPT_TEMPLATE = """以下のニュース記事から主要なテーマとアイデアを統合した包括的なブリーフィングドキュメントを作成してください。まずは、最も重要なポイントを簡潔にまとめたエグゼクティブサマリーから始めましょう。本文では、情報源に含まれる主要なテーマ、証拠、そして結論を詳細かつ徹底的に検証する必要があります。分析は、明瞭性を確保するために、見出しと箇条書きを用いて論理的に構成する必要があります。トーンは客観的かつ鋭いものでなければなりません。
 
 # ニュース記事
-```txt
+```markdown
 {article_content}
 ```"""
 ONE_SENTENCE_PROMPT_TEMPLATE = """以下のニュース記事を、内容が過不足なく伝わるように「一文」で要約してください。
 余計な解説は不要です。
 
 # ニュース記事
-```txt
+```markdown
 {article_content}
 ```"""
 
@@ -376,6 +376,18 @@ def _extract_transcript_section(markdown_text: str) -> str:
     if match is None:
         return ""
     return match.group("body").strip()
+
+
+def _visible_text_parts_to_markdown(visible_text_parts: list[str]) -> str:
+    """可視テキスト断片から最低限の Markdown 本文を組み立てる。"""
+    paragraphs: list[str] = []
+    for raw_part in visible_text_parts:
+        normalized = raw_part.strip()
+        if not normalized:
+            continue
+        escaped = re.sub(r"([\\`*_{}\[\]()#+\-.!|>])", r"\\\1", normalized)
+        paragraphs.append(escaped)
+    return "\n\n".join(paragraphs)
 
 
 def _fetch_youtube_transcript_with_markitdown(article_url: str, timeout_sec: int = 120) -> dict[str, Any]:
@@ -709,8 +721,8 @@ def _extract_article_content_and_metadata(article_html: str) -> dict[str, Any]:
     """記事HTMLから本文とメタデータを抽出して返す。
 
     処理内容:
-        自前HTMLパーサーでタイトル・メタ情報・可視テキストを抽出し、本文は trafilatura を優先、
-        空の場合は可視テキスト連結へフォールバックする。
+        自前HTMLパーサーでタイトル・メタ情報・可視テキストを抽出し、本文は trafilatura の
+        Markdown 抽出を優先、空の場合は可視テキストから Markdown 本文を組み立てて返す。
     入力:
         article_html: 記事HTML文字列。
     出力:
@@ -730,7 +742,7 @@ def _extract_article_content_and_metadata(article_html: str) -> dict[str, Any]:
 
     extracted_content = trafilatura.extract(
         article_html,
-        output_format="txt",
+        output_format="markdown",
         include_comments=False,
         include_tables=False,
         deduplicate=True,
@@ -741,7 +753,7 @@ def _extract_article_content_and_metadata(article_html: str) -> dict[str, Any]:
         content = ""
 
     if not content:
-        content = "\n".join(parser.visible_text_parts).strip()
+        content = _visible_text_parts_to_markdown(parser.visible_text_parts)
 
     return {
         "title": parser.title or "",
