@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "daily life workflows"
 requires-python = "==3.13.*"
 dependencies = [
+  "chromadb==1.5.7",
   "fakeredis<2.35",
   "markitdown[youtube-transcription]==0.1.5",
   "litellm==1.83.4",

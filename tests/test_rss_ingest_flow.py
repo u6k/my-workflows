@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -17,7 +16,12 @@ retry:
   backoff_multiplier: 2
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
-  ollama_connection_block: ollama-connection
+  llm_connection_block: llm-connection
+chroma:
+  host: 127.0.0.1
+  port: 8000
+  ssl: false
+  collection_name: rss-articles
 ollama:
   request_timeout_sec: 120
 rss_ingest:
@@ -26,8 +30,6 @@ rss_ingest:
   s3_bucket: news-bucket
   s3_prefix: rss
   llm_model: qwen3.5:0.8b
-  llm_embedding: nomic-embed-text
-  sqlite_path: .data/rss_embeddings.sqlite3
 """
 
 
@@ -36,7 +38,12 @@ retry:
   max_retries: 3
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
-  ollama_connection_block: ollama-connection
+  llm_connection_block: llm-connection
+chroma:
+  host: 127.0.0.1
+  port: 8000
+  ssl: false
+  collection_name: rss-articles
 ollama:
   request_timeout_sec: 120
 rss_ingest:
@@ -44,9 +51,52 @@ rss_ingest:
   s3_bucket: news-bucket
   s3_prefix: rss
   llm_model: qwen3.5:0.8b
-  llm_embedding: nomic-embed-text
-  sqlite_path: .data/rss_embeddings.sqlite3
 """
+
+
+class FakeCollection:
+    def __init__(self) -> None:
+        self.records: dict[str, dict[str, object]] = {}
+
+    def upsert(self, ids, embeddings=None, documents=None, metadatas=None):
+        for index, item_id in enumerate(ids):
+            self.records[item_id] = {
+                "embedding": embeddings[index] if embeddings is not None else None,
+                "document": documents[index] if documents is not None else None,
+                "metadata": metadatas[index] if metadatas is not None else None,
+            }
+
+    def get(self, ids=None, where=None, include=None):
+        if ids is not None:
+            found_ids = [item_id for item_id in ids if item_id in self.records]
+            return {"ids": found_ids}
+
+        matched = []
+        for item_id, payload in self.records.items():
+            metadata = payload["metadata"] if isinstance(payload, dict) else None
+            if not isinstance(metadata, dict):
+                continue
+            epoch = metadata.get("fetch_timestamp_epoch")
+            if isinstance(where, dict):
+                predicates = where.get("$and", [])
+                okay = True
+                for predicate in predicates:
+                    condition = predicate.get("fetch_timestamp_epoch")
+                    if not isinstance(condition, dict):
+                        continue
+                    if "$gte" in condition and not (epoch >= condition["$gte"]):
+                        okay = False
+                    if "$lt" in condition and not (epoch < condition["$lt"]):
+                        okay = False
+                if not okay:
+                    continue
+            matched.append((item_id, payload))
+        return {
+            "ids": [item_id for item_id, _ in matched],
+            "metadatas": [payload["metadata"] for _, payload in matched],
+            "embeddings": [payload["embedding"] for _, payload in matched],
+            "documents": [payload["document"] for _, payload in matched],
+        }
 
 
 def test_load_config_task_returns_config_when_valid(tmp_path) -> None:
@@ -82,15 +132,18 @@ ollama:
   request_timeout_sec: 0
 prefect_blocks:
   aws_credentials_block: aws-credentials-prod
-  ollama_connection_block: ollama-connection
+  llm_connection_block: llm-connection
+chroma:
+  host: 127.0.0.1
+  port: 8000
+  ssl: false
+  collection_name: rss-articles
 rss_ingest:
   rss_urls:
     - https://example.com/rss.xml
   s3_bucket: news-bucket
   s3_prefix: rss
   llm_model: qwen3.5:0.8b
-  llm_embedding: nomic-embed-text
-  sqlite_path: .data/rss_embeddings.sqlite3
 """,
         encoding="utf-8",
     )
@@ -99,49 +152,75 @@ rss_ingest:
         rss_ingest_flow.load_config_task.fn(str(config_path))
 
 
+def test_load_config_task_raises_when_chroma_host_is_missing(tmp_path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        VALID_CONFIG_YAML.replace("host: 127.0.0.1", "host: ''"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="config.chroma.host"):
+        rss_ingest_flow.load_config_task.fn(str(config_path))
+
+
+def test_get_embeddings_collection_uses_http_client_configuration() -> None:
+    mock_collection = MagicMock()
+    mock_client = MagicMock()
+    mock_client.get_or_create_collection.return_value = mock_collection
+
+    with patch("chromadb.HttpClient", return_value=mock_client) as mock_http_client:
+        result = rss_ingest_flow._get_embeddings_collection(
+            {"host": "127.0.0.1", "port": 8000, "ssl": False, "collection_name": "rss-articles"}
+        )
+
+    assert result is mock_collection
+    mock_http_client.assert_called_once_with(host="127.0.0.1", port=8000, ssl=False)
+    mock_client.get_or_create_collection.assert_called_once_with(name="rss-articles")
+
+
 @patch("flows.rss_ingest_flow.get_run_logger")
-@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
+@patch("flows.rss_ingest_flow.load_llm_connection_secret")
 @patch("flows.rss_ingest_flow.AwsCredentials")
 def test_validate_prerequisites_task_loads_blocks_and_json_secret(
     mock_aws_credentials: MagicMock,
-    mock_load_ollama_connection_secret: MagicMock,
+    mock_load_llm_connection_secret: MagicMock,
     mock_get_run_logger: MagicMock,
 ) -> None:
     mock_get_run_logger.return_value = MagicMock()
-    mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_load_llm_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
 
     parsed_config = {
         "rss_ingest": {"rss_urls": ["https://example.com/rss.xml", "https://example.com/rss.xml"]},
         "retry": {"max_retries": 3},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_block": "ollama-connection",
+            "llm_connection_block": "llm-connection",
         },
     }
 
     rss_ingest_flow.validate_prerequisites_task.fn(parsed_config)
 
     mock_aws_credentials.load.assert_called_once_with("aws-credentials-prod")
-    mock_load_ollama_connection_secret.assert_called_once()
+    mock_load_llm_connection_secret.assert_called_once()
 
 
 @patch("flows.rss_ingest_flow.get_run_logger")
-@patch("flows.rss_ingest_flow.load_ollama_connection_secret")
+@patch("flows.rss_ingest_flow.load_llm_connection_secret")
 @patch("flows.rss_ingest_flow.AwsCredentials")
 def test_validate_prerequisites_task_raises_when_secret_value_is_not_dict(
     mock_aws_credentials: MagicMock,
-    mock_load_ollama_connection_secret: MagicMock,
+    mock_load_llm_connection_secret: MagicMock,
     mock_get_run_logger: MagicMock,
 ) -> None:
     mock_get_run_logger.return_value = MagicMock()
-    mock_load_ollama_connection_secret.side_effect = ValueError("Ollama Secret block value must be a dict")
+    mock_load_llm_connection_secret.side_effect = ValueError("Ollama Secret block value must be a dict")
 
     parsed_config = {
         "rss_ingest": {"rss_urls": ["https://example.com/rss.xml"]},
         "retry": {"max_retries": 3},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_block": "ollama-connection",
+            "llm_connection_block": "llm-connection",
         },
     }
 
@@ -292,93 +371,74 @@ def test_build_one_sentence_prompt_includes_article_content() -> None:
     assert "一文" in prompt
 
 
-def test_summarize_briefing_task_returns_ollama_response() -> None:
-    """Test case: summarize briefing task returns ollama response."""
+def test_summarize_briefing_task_returns_llm_response() -> None:
+    """Test case: summarize briefing task returns llm response."""
     mock_logger = MagicMock()
 
     with (
         patch("flows.rss_ingest_flow._get_task_logger", return_value=mock_logger),
-        patch("flows.rss_ingest_flow.invoke_ollama_generate", return_value="summary text") as mock_invoke_ollama_generate,
+        patch("flows.rss_ingest_flow.invoke_llm_generate", return_value="summary text") as mock_invoke_llm_generate,
     ):
         summary = rss_ingest_flow.summarize_briefing_task.fn(
             article_content="本文",
-            ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+            llm_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
             timeout_sec=45,
         )
 
     assert summary == "summary text"
     assert mock_logger.debug.call_count == 2
-    assert mock_invoke_ollama_generate.call_args.kwargs["timeout_sec"] == 45
-    assert mock_invoke_ollama_generate.call_args.kwargs["ollama_connection"]["model"] == "llama3.1:8b"
-    assert mock_invoke_ollama_generate.call_args.kwargs["logger"] is mock_logger
+    assert mock_invoke_llm_generate.call_args.kwargs["timeout_sec"] == 45
+    assert mock_invoke_llm_generate.call_args.kwargs["llm_connection"]["model"] == "llama3.1:8b"
+    assert mock_invoke_llm_generate.call_args.kwargs["logger"] is mock_logger
 
 
-def test_summarize_one_sentence_task_returns_ollama_response() -> None:
-    """Test case: summarize one sentence task returns ollama response."""
+def test_summarize_one_sentence_task_returns_llm_response() -> None:
+    """Test case: summarize one sentence task returns llm response."""
     mock_logger = MagicMock()
 
     with (
         patch("flows.rss_ingest_flow._get_task_logger", return_value=mock_logger),
-        patch("flows.rss_ingest_flow.invoke_ollama_generate", return_value="summary text") as mock_invoke_ollama_generate,
+        patch("flows.rss_ingest_flow.invoke_llm_generate", return_value="summary text") as mock_invoke_llm_generate,
     ):
         summary = rss_ingest_flow.summarize_one_sentence_task.fn(
             article_content="本文",
-            ollama_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
+            llm_connection={"base_url": "http://localhost:11434", "model": "llama3.1:8b"},
             timeout_sec=30,
         )
 
     assert summary == "summary text"
     assert mock_logger.debug.call_count == 2
-    assert mock_invoke_ollama_generate.call_args.kwargs["timeout_sec"] == 30
-    assert mock_invoke_ollama_generate.call_args.kwargs["ollama_connection"]["model"] == "llama3.1:8b"
-    assert mock_invoke_ollama_generate.call_args.kwargs["logger"] is mock_logger
+    assert mock_invoke_llm_generate.call_args.kwargs["timeout_sec"] == 30
+    assert mock_invoke_llm_generate.call_args.kwargs["llm_connection"]["model"] == "llama3.1:8b"
+    assert mock_invoke_llm_generate.call_args.kwargs["logger"] is mock_logger
 
 
-@patch("flows.rss_ingest_flow.invoke_ollama_embeddings")
-def test_upsert_briefing_embedding_to_sqlite_task_stores_embedding(mock_invoke_ollama_embeddings: MagicMock, tmp_path) -> None:
-    """Test case: upsert briefing embedding to sqlite task stores embedding."""
-    sqlite_path = tmp_path / "rss_embeddings.sqlite3"
-    mock_invoke_ollama_embeddings.return_value = [0.1, 0.2, 0.3]
+def test_upsert_briefing_embedding_to_chroma_task_stores_document_and_metadata() -> None:
+    """Test case: chroma upsert stores document and metadata and lets Chroma build embeddings."""
+    collection = FakeCollection()
 
-    rss_ingest_flow.upsert_briefing_embedding_to_sqlite_task.fn(
-        article={
-            "id": "article-1",
-            "url": "https://example.com/a",
-            "title": "Article title",
-            "briefing_summary": "summary text",
-            "one_sentence_summary": "one sentence",
-            "published_timestamp": "2026-04-04T00:00:00+00:00",
-            "fetch_timestamp": "2026-04-04T01:00:00+00:00",
-            "metadata": {"source_feed_url": "https://example.com/rss.xml"},
-        },
-        embedding_connection={"base_url": "http://localhost:11434", "model": "nomic-embed-text"},
-        sqlite_path=str(sqlite_path),
-        timeout_sec=30,
-    )
-
-    import sqlite3
-
-    with sqlite3.connect(sqlite_path) as conn:
-        row = conn.execute(
-            """
-            SELECT article_id, article_url, title, published_timestamp, fetch_timestamp, briefing_summary, one_sentence_summary, metadata_json, embedding_json, embedding_timestamp
-            FROM article_embeddings
-            WHERE article_id=?
-            """,
-            ("article-1",),
-        ).fetchone()
-
-    assert row is not None
-    assert row[0] == "article-1"
-    assert row[1] == "https://example.com/a"
-    assert row[2] == "Article title"
-    assert row[3] == "2026-04-04T00:00:00+00:00"
-    assert row[4] == "2026-04-04T01:00:00+00:00"
-    assert row[5] == "summary text"
-    assert row[6] == "one sentence"
-    assert row[7] == '{"source_feed_url": "https://example.com/rss.xml"}'
-    assert row[8] == "[0.1, 0.2, 0.3]"
-    assert isinstance(row[9], str) and row[9] != ""
+    with patch("flows.rss_ingest_flow._get_embeddings_collection", return_value=collection):
+        rss_ingest_flow.upsert_briefing_embedding_to_chroma_task.fn(
+            article={
+                "id": "article-1",
+                "url": "https://example.com/a",
+                "title": "Article title",
+                "briefing_summary": "summary text",
+                "one_sentence_summary": "one sentence",
+                "fetch_timestamp": "2026-04-04T01:00:00+00:00",
+                "metadata": {"source_feed_url": "https://example.com/rss.xml"},
+            },
+            chroma_config={"host": "127.0.0.1", "port": 8000, "ssl": False, "collection_name": "rss-articles"},
+        )
+    stored = collection.records["article-1"]
+    assert stored["embedding"] is None
+    assert stored["document"] == "summary text"
+    assert stored["metadata"]["article_url"] == "https://example.com/a"
+    assert stored["metadata"]["title"] == "Article title"
+    assert stored["metadata"]["fetch_timestamp"] == "2026-04-04T01:00:00+00:00"
+    assert stored["metadata"]["one_sentence_summary"] == "one sentence"
+    assert stored["metadata"]["metadata_json"] == '{"source_feed_url": "https://example.com/rss.xml"}'
+    assert isinstance(stored["metadata"]["embedding_timestamp"], str) and stored["metadata"]["embedding_timestamp"] != ""
 
 
 @patch("flows.rss_ingest_flow.trafilatura.extract")
@@ -568,41 +628,32 @@ def test_create_s3_client_raises_when_json_string_botocore_config_is_invalid() -
         rss_ingest_flow._create_s3_client(mock_aws_credentials)
 
 
-def test_check_s3_object_exists_task_returns_true_when_embedding_record_exists(tmp_path: Path) -> None:
+def test_check_s3_object_exists_task_returns_true_when_embedding_record_exists() -> None:
     """Test case: check s3 object exists task returns true when embedding record exists."""
-    sqlite_path = tmp_path / "rss_embeddings.sqlite3"
-    rss_ingest_flow._initialize_embeddings_sqlite(str(sqlite_path))
-    with sqlite3.connect(sqlite_path) as conn:
-        conn.execute(
-            """
-            INSERT INTO article_embeddings (
-                article_id, article_url, embedding_json, embedding_timestamp
-            ) VALUES (?, ?, ?, ?)
-            """,
-            (
-                "de0617c481337158695d4e48d5c275d2",
-                "https://example.com/posts/1",
-                "[0.1,0.2]",
-                "2026-04-04T00:00:00+00:00",
-            ),
-        )
-        conn.commit()
-    result = rss_ingest_flow.check_s3_object_exists_task.fn(
-        article_url="https://example.com/posts/1",
-        sqlite_path=str(sqlite_path),
+    collection = FakeCollection()
+    collection.upsert(
+        ids=["de0617c481337158695d4e48d5c275d2"],
+        embeddings=[[0.1, 0.2]],
+        documents=["summary"],
+        metadatas=[{"fetch_timestamp": "2026-04-04T00:00:00+00:00", "fetch_timestamp_epoch": 1775260800}],
     )
+    with patch("flows.rss_ingest_flow._get_embeddings_collection", return_value=collection):
+        result = rss_ingest_flow.check_s3_object_exists_task.fn(
+            article_url="https://example.com/posts/1",
+            chroma_config={"host": "127.0.0.1", "port": 8000, "ssl": False, "collection_name": "rss-articles"},
+        )
 
     assert result["exists"] is True
     assert result["id"] == "de0617c481337158695d4e48d5c275d2"
 
 
-def test_check_s3_object_exists_task_returns_false_when_embedding_record_not_found(tmp_path: Path) -> None:
+def test_check_s3_object_exists_task_returns_false_when_embedding_record_not_found() -> None:
     """Test case: check s3 object exists task returns false when embedding record not found."""
-    sqlite_path = tmp_path / "rss_embeddings.sqlite3"
-    result = rss_ingest_flow.check_s3_object_exists_task.fn(
-        article_url="https://example.com/posts/1",
-        sqlite_path=str(sqlite_path),
-    )
+    with patch("flows.rss_ingest_flow._get_embeddings_collection", return_value=FakeCollection()):
+        result = rss_ingest_flow.check_s3_object_exists_task.fn(
+            article_url="https://example.com/posts/1",
+            chroma_config={"host": "127.0.0.1", "port": 8000, "ssl": False, "collection_name": "rss-articles"},
+        )
 
     assert result["exists"] is False
     assert result["id"] == "de0617c481337158695d4e48d5c275d2"
@@ -624,11 +675,13 @@ def test_fetch_article_task_raises_when_status_is_not_200(mock_urlopen: MagicMoc
 @patch("flows.rss_ingest_flow.fetch_and_summarize_article_flow")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow._get_embeddings_collection")
 @patch("flows.rss_ingest_flow.load_ollama_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_continues_when_article_fetch_fails(
     mock_load_config_task: MagicMock,
     mock_load_ollama_connection_secret: MagicMock,
+    mock_get_embeddings_collection: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_and_summarize_article_flow: MagicMock,
@@ -636,22 +689,22 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
     mock_check_embedding_record_exists_task: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
+        "chroma": {"host": "127.0.0.1", "port": 8000, "ssl": False, "collection_name": "rss-articles"},
         "rss_ingest": {
             "rss_urls": ["https://example.com/rss.xml"],
             "s3_bucket": "news-bucket",
             "s3_prefix": "rss",
             "llm_model": "qwen3.5:0.8b",
-            "llm_embedding": "nomic-embed-text",
-            "sqlite_path": ".data/rss_embeddings.sqlite3",
         },
         "retry": {"max_retries": 3},
         "ollama": {"request_timeout_sec": 120},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_block": "ollama-connection",
+            "llm_connection_block": "llm-connection",
         },
     }
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_get_embeddings_collection.return_value = FakeCollection()
     mock_fetch_feed_task.return_value = ["https://example.com/a", "https://example.com/b"]
     mock_check_embedding_record_exists_task.side_effect = [
         {"exists": False, "id": "aaaa"},
@@ -684,11 +737,13 @@ def test_rss_ingest_flow_continues_when_article_fetch_fails(
 @patch("flows.rss_ingest_flow.fetch_and_summarize_article_flow")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow._get_embeddings_collection")
 @patch("flows.rss_ingest_flow.load_ollama_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exception(
     mock_load_config_task: MagicMock,
     mock_load_ollama_connection_secret: MagicMock,
+    mock_get_embeddings_collection: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_and_summarize_article_flow: MagicMock,
@@ -696,22 +751,22 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
     mock_check_embedding_record_exists_task: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
+        "chroma": {"host": "127.0.0.1", "port": 8000, "ssl": False, "collection_name": "rss-articles"},
         "rss_ingest": {
             "rss_urls": ["https://example.com/rss.xml"],
             "s3_bucket": "news-bucket",
             "s3_prefix": "rss",
             "llm_model": "qwen3.5:0.8b",
-            "llm_embedding": "nomic-embed-text",
-            "sqlite_path": ".data/rss_embeddings.sqlite3",
         },
         "retry": {"max_retries": 3},
         "ollama": {"request_timeout_sec": 120},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_block": "ollama-connection",
+            "llm_connection_block": "llm-connection",
         },
     }
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_get_embeddings_collection.return_value = FakeCollection()
     mock_fetch_feed_task.return_value = ["https://example.com/a", "https://example.com/b"]
     mock_check_embedding_record_exists_task.side_effect = [
         {"exists": False, "id": "aaaa"},
@@ -742,11 +797,13 @@ def test_rss_ingest_flow_continues_when_article_fetch_raises_unexpected_exceptio
 @patch("flows.rss_ingest_flow.fetch_and_summarize_article_flow")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow._get_embeddings_collection")
 @patch("flows.rss_ingest_flow.load_ollama_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
     mock_load_config_task: MagicMock,
     mock_load_ollama_connection_secret: MagicMock,
+    mock_get_embeddings_collection: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_and_summarize_article_flow: MagicMock,
@@ -754,22 +811,22 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
     mock_check_embedding_record_exists_task: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
+        "chroma": {"host": "127.0.0.1", "port": 8000, "ssl": False, "collection_name": "rss-articles"},
         "rss_ingest": {
             "rss_urls": ["https://example.com/rss.xml"],
             "s3_bucket": "news-bucket",
             "s3_prefix": "rss",
             "llm_model": "qwen3.5:0.8b",
-            "llm_embedding": "nomic-embed-text",
-            "sqlite_path": ".data/rss_embeddings.sqlite3",
         },
         "retry": {"max_retries": 3},
         "ollama": {"request_timeout_sec": 120},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_block": "ollama-connection",
+            "llm_connection_block": "llm-connection",
         },
     }
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_get_embeddings_collection.return_value = FakeCollection()
     mock_fetch_feed_task.return_value = ["https://example.com/a"]
     mock_check_embedding_record_exists_task.return_value = {"exists": True, "id": "aaaa"}
 
@@ -789,11 +846,13 @@ def test_rss_ingest_flow_skips_fetch_when_s3_object_exists(
 @patch("flows.rss_ingest_flow.fetch_and_summarize_article_flow")
 @patch("flows.rss_ingest_flow.fetch_feed_task")
 @patch("flows.rss_ingest_flow.validate_prerequisites_task")
+@patch("flows.rss_ingest_flow._get_embeddings_collection")
 @patch("flows.rss_ingest_flow.load_ollama_connection_secret")
 @patch("flows.rss_ingest_flow.load_config_task")
 def test_rss_ingest_flow_skips_article_when_summarization_fails(
     mock_load_config_task: MagicMock,
     mock_load_ollama_connection_secret: MagicMock,
+    mock_get_embeddings_collection: MagicMock,
     mock_validate_prerequisites_task: MagicMock,
     mock_fetch_feed_task: MagicMock,
     mock_fetch_and_summarize_article_flow: MagicMock,
@@ -801,22 +860,22 @@ def test_rss_ingest_flow_skips_article_when_summarization_fails(
     mock_check_embedding_record_exists_task: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
+        "chroma": {"host": "127.0.0.1", "port": 8000, "ssl": False, "collection_name": "rss-articles"},
         "rss_ingest": {
             "rss_urls": ["https://example.com/rss.xml"],
             "s3_bucket": "news-bucket",
             "s3_prefix": "rss",
             "llm_model": "qwen3.5:0.8b",
-            "llm_embedding": "nomic-embed-text",
-            "sqlite_path": ".data/rss_embeddings.sqlite3",
         },
         "retry": {"max_retries": 3},
         "ollama": {"request_timeout_sec": 120},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_block": "ollama-connection",
+            "llm_connection_block": "llm-connection",
         },
     }
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434", "model": "llama3.1:8b"}
+    mock_get_embeddings_collection.return_value = FakeCollection()
     mock_fetch_feed_task.return_value = ["https://example.com/a"]
     mock_check_embedding_record_exists_task.return_value = {"exists": False, "id": "aaaa"}
     mock_fetch_and_summarize_article_flow.side_effect = RuntimeError("ollama error")
@@ -863,19 +922,18 @@ def test_fetch_summarize_url_flow_returns_article_with_summaries(
     mock_fetch_and_summarize_article_flow: MagicMock,
 ) -> None:
     mock_load_config_task.return_value = {
+        "chroma": {"host": "127.0.0.1", "port": 8000, "ssl": False, "collection_name": "rss-articles"},
         "rss_ingest": {
             "rss_urls": ["https://example.com/rss.xml"],
             "s3_bucket": "news-bucket",
             "s3_prefix": "rss",
             "llm_model": "qwen3.5:0.8b",
-            "llm_embedding": "nomic-embed-text",
-            "sqlite_path": ".data/rss_embeddings.sqlite3",
         },
         "retry": {"max_retries": 3},
         "ollama": {"request_timeout_sec": 45},
         "prefect_blocks": {
             "aws_credentials_block": "aws-credentials-prod",
-            "ollama_connection_block": "ollama-connection",
+            "llm_connection_block": "llm-connection",
         },
     }
     mock_load_ollama_connection_secret.return_value = {"base_url": "http://localhost:11434"}
@@ -926,7 +984,7 @@ def test_fetch_and_summarize_article_flow_calls_tasks_in_order(
 
     article = rss_ingest_flow.fetch_and_summarize_article_flow.fn(
         article_url="https://example.com/a",
-        ollama_connection={"base_url": "http://localhost:11434", "model": "qwen3.5:0.8b"},
+        llm_connection={"base_url": "http://localhost:11434", "model": "qwen3.5:0.8b"},
         timeout_sec=20,
     )
 

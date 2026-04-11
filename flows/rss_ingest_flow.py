@@ -4,7 +4,6 @@ import logging
 import hashlib
 import json
 import re
-import sqlite3
 import sys
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -22,27 +21,33 @@ import trafilatura
 if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parent))
     from common import (
-        build_ollama_connection,
+        build_llm_connection,
         create_s3_client,
-        invoke_ollama_generate,
-        invoke_ollama_embeddings,
-        load_ollama_connection_secret,
+        get_chroma_collection,
+        invoke_llm_generate,
+        load_llm_connection_secret,
         load_yaml_config,
+        validate_chroma_config,
     )
 else:
     from .common import (
-        build_ollama_connection,
+        build_llm_connection,
         create_s3_client,
-        invoke_ollama_generate,
-        invoke_ollama_embeddings,
-        load_ollama_connection_secret,
+        get_chroma_collection,
+        invoke_llm_generate,
+        load_llm_connection_secret,
         load_yaml_config,
+        validate_chroma_config,
     )
+
+build_ollama_connection = build_llm_connection
+load_ollama_connection_secret = load_llm_connection_secret
+invoke_ollama_generate = invoke_llm_generate
 
 REQUIRED_PREFECT_BLOCK_KEYS = (
     "aws_credentials_block",
 )
-BRIEFING_PROMPT_TEMPLATE = """以下のニュース記事から主要なテーマとアイデアを統合した包括的なブリーフィングドキュメントを作成してください。まずは、最も重要なポイントを簡潔にまとめたエグゼクティブサマリーから始めましょう。本文では、情報源に含まれる主要なテーマ、証拠、そして結論を​​詳細かつ徹底的に検証する必要があります。分析は、明瞭性を確保するために、見出しと箇条書きを用いて論理的に構成する必要があります。トーンは客観的かつ鋭いものでなければなりません。
+BRIEFING_PROMPT_TEMPLATE = """以下のニュース記事から主要なテーマとアイデアを統合した包括的なブリーフィングドキュメントを作成してください。まずは、最も重要なポイントを簡潔にまとめたエグゼクティブサマリーから始めましょう。本文では、情報源に含まれる主要なテーマ、証拠、そして結論を詳細かつ徹底的に検証する必要があります。分析は、明瞭性を確保するために、見出しと箇条書きを用いて論理的に構成する必要があります。トーンは客観的かつ鋭いものでなければなりません。
 
 # ニュース記事
 ```txt
@@ -159,12 +164,7 @@ def _validate_config(config: dict[str, Any]) -> None:
     rss_ingest_model = rss_ingest.get("llm_model")
     if not isinstance(rss_ingest_model, str) or not rss_ingest_model:
         raise ValueError("config.rss_ingest.llm_model must be a non-empty string")
-    rss_ingest_embedding_model = rss_ingest.get("llm_embedding")
-    if not isinstance(rss_ingest_embedding_model, str) or not rss_ingest_embedding_model:
-        raise ValueError("config.rss_ingest.llm_embedding must be a non-empty string")
-    sqlite_path = rss_ingest.get("sqlite_path")
-    if not isinstance(sqlite_path, str) or not sqlite_path:
-        raise ValueError("config.rss_ingest.sqlite_path must be a non-empty string")
+    validate_chroma_config(config.get("chroma"))
 
 
 def _build_safe_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
@@ -202,13 +202,12 @@ def _build_safe_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
             "aws_credentials_block": prefect_blocks.get("aws_credentials_block"),
             "llm_connection_block": prefect_blocks.get("llm_connection_block", prefect_blocks.get("ollama_connection_block")),
         },
+        "chroma": config.get("chroma"),
         "rss_ingest": {
             "rss_urls": rss_ingest.get("rss_urls"),
             "s3_bucket": rss_ingest.get("s3_bucket"),
             "s3_prefix": rss_ingest.get("s3_prefix"),
             "llm_model": rss_ingest.get("llm_model"),
-            "llm_embedding": rss_ingest.get("llm_embedding"),
-            "sqlite_path": rss_ingest.get("sqlite_path"),
         },
     }
 
@@ -471,47 +470,19 @@ def _create_s3_client(aws_credentials: AwsCredentials) -> Any:
     return create_s3_client(aws_credentials)
 
 
-def _initialize_embeddings_sqlite(sqlite_path: str) -> None:
-    """埋め込み保存用SQLiteを初期化する。
+def _get_embeddings_collection(
+    chroma_config: dict[str, Any],
+) -> Any:
+    """埋め込み保存先の Chroma collection を取得する。"""
+    return get_chroma_collection(chroma_config=chroma_config)
 
-    処理内容:
-        `sqlite_path` の親ディレクトリを必要に応じて作成し、`article_embeddings`
-        テーブルと検索用インデックスを作成する。
-    入力:
-        sqlite_path: 埋め込み保存先SQLiteファイルパス。
-    出力:
-        なし。
-    例外:
-        sqlite3.Error: DB作成やDDL実行に失敗した場合。
-    外部依存リソース:
-        ローカルファイルシステム、SQLite。
-    """
-    db_path = Path(sqlite_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS article_embeddings (
-                article_id TEXT PRIMARY KEY,
-                article_url TEXT NOT NULL,
-                title TEXT,
-                published_timestamp TEXT,
-                fetch_timestamp TEXT,
-                briefing_summary TEXT,
-                one_sentence_summary TEXT,
-                metadata_json TEXT,
-                embedding_json TEXT NOT NULL,
-                embedding_timestamp TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_article_embeddings_model
-            ON article_embeddings(article_url)
-            """
-        )
-        conn.commit()
+
+def _fetch_timestamp_to_epoch(fetch_timestamp: str) -> int:
+    """ISO 8601 の fetch_timestamp を UTC epoch seconds へ変換する。"""
+    if not isinstance(fetch_timestamp, str) or not fetch_timestamp:
+        raise ValueError("article.fetch_timestamp must be a non-empty string")
+    normalized = fetch_timestamp.replace("Z", "+00:00")
+    return int(datetime.fromisoformat(normalized).timestamp())
 
 
 def _build_briefing_prompt(article_content: str) -> str:
@@ -914,216 +885,181 @@ def store_to_s3_task(article: dict[str, Any], storage: dict[str, Any], aws_crede
 
 
 @task(name="check_s3_object_exists_task")
-def check_s3_object_exists_task(article_url: str, sqlite_path: str) -> dict[str, Any]:
+def check_s3_object_exists_task(
+    article_url: str,
+    chroma_config: dict[str, Any],
+) -> dict[str, Any]:
     """記事URL対応の埋め込みレコード存在有無を確認する。
 
     処理内容:
-        URLをID化して `article_embeddings` テーブルの存在確認を行う。
+        URLをID化して Chroma collection 上の埋め込みレコード存在確認を行う。
     入力:
         article_url: 記事URL。
-        sqlite_path: 埋め込み保存先SQLiteファイルパス。
+        chroma_config: Chroma HTTP 接続設定。
     出力:
         dict[str, Any]: `exists` / `id` を含む辞書。
     例外:
-        sqlite3.Error: DBアクセス失敗時。
+        ChromaDB 由来例外: collection アクセス失敗時。
     外部依存リソース:
-        ローカルSQLiteファイル。
+        ChromaDB HTTP サーバー。
     """
     article_id = _url_to_md5(article_url)
-    _initialize_embeddings_sqlite(sqlite_path)
-    with sqlite3.connect(sqlite_path) as conn:
-        row = conn.execute(
-            "SELECT 1 FROM article_embeddings WHERE article_id=? LIMIT 1",
-            (article_id,),
-        ).fetchone()
-    return {"exists": row is not None, "id": article_id}
+    collection = _get_embeddings_collection(chroma_config)
+    result = collection.get(ids=[article_id], include=[])
+    ids = result.get("ids", []) if isinstance(result, dict) else []
+    return {"exists": article_id in ids, "id": article_id}
 
 
 @task(name="check_embedding_record_exists_task")
-def check_embedding_record_exists_task(article_url: str, sqlite_path: str) -> dict[str, Any]:
-    """記事URL対応のSQLite埋め込みレコード存在有無を確認する。
+def check_embedding_record_exists_task(
+    article_url: str,
+    chroma_config: dict[str, Any],
+) -> dict[str, Any]:
+    """記事URL対応の埋め込みレコード存在有無を確認する。
 
     処理内容:
-        URLをID化して `article_embeddings` から存在確認し、存在有無を返す。
+        URLをID化して Chroma collection から存在確認し、存在有無を返す。
     入力:
         article_url: 記事URL。
-        sqlite_path: 埋め込み保存先SQLiteファイルパス。
+        chroma_config: Chroma HTTP 接続設定。
     出力:
         dict[str, Any]: `exists` / `id` を含む辞書。
     例外:
-        sqlite3.Error: DBアクセス失敗時。
+        ChromaDB 由来例外: collection アクセス失敗時。
     外部依存リソース:
-        ローカルSQLiteファイル。
+        ChromaDB HTTP サーバー。
     """
-    article_id = _url_to_md5(article_url)
-    _initialize_embeddings_sqlite(sqlite_path)
-    with sqlite3.connect(sqlite_path) as conn:
-        row = conn.execute(
-            "SELECT 1 FROM article_embeddings WHERE article_id=? LIMIT 1",
-            (article_id,),
-        ).fetchone()
-    return {"exists": row is not None, "id": article_id}
+    return check_s3_object_exists_task.fn(
+        article_url=article_url,
+        chroma_config=chroma_config,
+    )
 
 
 @task(name="summarize_briefing_task")
-def summarize_briefing_task(article_content: str, ollama_connection: dict[str, str], timeout_sec: int = 120) -> str:
+def summarize_briefing_task(article_content: str, llm_connection: dict[str, str], timeout_sec: int = 120) -> str:
     """記事本文を詳細ブリーフィング形式で要約する。
 
     処理内容:
-        ブリーフィング用プロンプトを作成し、Ollama生成APIを呼び出して要約文を返す。
+        ブリーフィング用プロンプトを作成し、LLM生成APIを呼び出して要約文を返す。
     入力:
         article_content: 記事本文。
-        ollama_connection: Ollama接続設定。
+        llm_connection: LLM接続設定。
         timeout_sec: APIタイムアウト秒。
     出力:
         str: 要約テキスト。
     例外:
-        ValueError: Ollama応答が空の場合。
-        Ollama呼び出し由来例外: 通信・解析失敗時。
+        ValueError: LLM応答が空の場合。
+        LLM呼び出し由来例外: 通信・解析失敗時。
     外部依存リソース:
-        Ollama HTTP API。
+        LiteLLM 対応 LLM API。
     """
     logger = _get_task_logger()
     prompt = _build_briefing_prompt(article_content)
-    logger.debug("ollama request sent: prompt=%s", prompt)
-    summary = invoke_ollama_generate(
-        ollama_connection=ollama_connection,
+    logger.debug("llm request sent: prompt=%s", prompt)
+    summary = invoke_llm_generate(
+        llm_connection=llm_connection,
         prompt=prompt,
         timeout_sec=timeout_sec,
         logger=logger,
     )
-    logger.debug("ollama response received: response=%s", summary)
+    logger.debug("llm response received: response=%s", summary)
     if not summary:
-        raise ValueError("Ollama response does not contain summary text")
+        raise ValueError("LLM response does not contain summary text")
     return summary
 
 
 @task(name="summarize_one_sentence_task")
-def summarize_one_sentence_task(article_content: str, ollama_connection: dict[str, str], timeout_sec: int = 120) -> str:
+def summarize_one_sentence_task(article_content: str, llm_connection: dict[str, str], timeout_sec: int = 120) -> str:
     """記事本文を一文で要約する。
 
     処理内容:
-        一文要約用プロンプトを作成し、Ollama生成APIから要約文を取得して返す。
+        一文要約用プロンプトを作成し、LLM生成APIから要約文を取得して返す。
     入力:
         article_content: 記事本文。
-        ollama_connection: Ollama接続設定。
+        llm_connection: LLM接続設定。
         timeout_sec: APIタイムアウト秒。
     出力:
         str: 一文要約テキスト。
     例外:
-        ValueError: Ollama応答が空の場合。
-        Ollama呼び出し由来例外: 通信・解析失敗時。
+        ValueError: LLM応答が空の場合。
+        LLM呼び出し由来例外: 通信・解析失敗時。
     外部依存リソース:
-        Ollama HTTP API。
+        LiteLLM 対応 LLM API。
     """
     logger = _get_task_logger()
     prompt = _build_one_sentence_prompt(article_content)
-    logger.debug("ollama request sent: prompt=%s", prompt)
-    summary = invoke_ollama_generate(
-        ollama_connection=ollama_connection,
+    logger.debug("llm request sent: prompt=%s", prompt)
+    summary = invoke_llm_generate(
+        llm_connection=llm_connection,
         prompt=prompt,
         timeout_sec=timeout_sec,
         logger=logger,
     )
-    logger.debug("ollama response received: response=%s", summary)
+    logger.debug("llm response received: response=%s", summary)
     if not summary:
-        raise ValueError("Ollama response does not contain one sentence summary text")
+        raise ValueError("LLM response does not contain one sentence summary text")
     return summary
 
 
-@task(name="upsert_briefing_embedding_to_sqlite_task")
-def upsert_briefing_embedding_to_sqlite_task(
+@task(name="upsert_briefing_embedding_to_chroma_task")
+def upsert_briefing_embedding_to_chroma_task(
     article: dict[str, Any],
-    embedding_connection: dict[str, str],
-    sqlite_path: str,
-    timeout_sec: int = 120,
+    chroma_config: dict[str, Any],
 ) -> None:
-    """記事ブリーフィング要約を埋め込み化してSQLiteへ保存する。
+    """記事ブリーフィング要約を埋め込み化して Chroma へ保存する。
 
     処理内容:
-        `briefing_summary` を埋め込み化し、記事識別子・URL・タイトル・公開時刻・
-        取得時刻・要約（詳細/一文）・metadata・ベクトル・埋め込み時刻を
-        `article_embeddings` テーブルへ upsert 保存する。あわせて記事辞書へ
-        `embedding_json` と `embedding_timestamp` を付与する。
+        `briefing_summary` を埋め込み化し、記事識別子・URL・タイトル・取得時刻・
+        要約（詳細/一文）・metadata・ベクトル・埋め込み時刻を Chroma collection
+        へ upsert 保存する。あわせて記事辞書へ `embedding_json` と
+        `embedding_timestamp` を付与する。
     入力:
         article: 記事辞書（`id`, `url`, `briefing_summary` 必須）。
-        embedding_connection: 埋め込みモデルのOllama接続設定。
-        sqlite_path: 埋め込み保存先SQLiteファイルパス。
-        timeout_sec: 埋め込みAPIタイムアウト秒。
+        chroma_config: Chroma HTTP 接続設定。
     出力:
         なし。
     例外:
         ValueError: `briefing_summary` が空または文字列でない場合。
-        sqlite3.Error: DB書き込み失敗時。
-        Ollama呼び出し由来例外: 通信・解析失敗時。
+        ChromaDB 由来例外: collection 書き込み失敗時。
     外部依存リソース:
-        Ollama HTTP API、ローカルSQLiteファイル。
+        ChromaDB HTTP サーバー。
     """
     logger = _get_task_logger()
     briefing_summary = article.get("briefing_summary")
     if not isinstance(briefing_summary, str) or not briefing_summary:
         raise ValueError("article.briefing_summary must be a non-empty string")
 
-    embedding = invoke_ollama_embeddings(
-        ollama_connection=embedding_connection,
-        text=briefing_summary,
-        timeout_sec=timeout_sec,
-        logger=logger,
-    )
-    _initialize_embeddings_sqlite(sqlite_path)
-    published_timestamp = article.get("published_timestamp")
-    if not isinstance(published_timestamp, str):
-        published_timestamp = None
     fetch_timestamp = article.get("fetch_timestamp")
-    if not isinstance(fetch_timestamp, str):
-        fetch_timestamp = datetime.now(timezone.utc).isoformat()
+    if not isinstance(fetch_timestamp, str) or not fetch_timestamp:
+        raise ValueError("article.fetch_timestamp must be a non-empty string")
     embedding_timestamp = datetime.now(timezone.utc).isoformat()
     one_sentence_summary = article.get("one_sentence_summary")
     if not isinstance(one_sentence_summary, str):
         one_sentence_summary = None
     metadata = article.get("metadata")
     metadata_json = json.dumps(metadata if isinstance(metadata, dict) else {}, ensure_ascii=False)
-    article["embedding_json"] = embedding
     article["embedding_timestamp"] = embedding_timestamp
-
-    with sqlite3.connect(sqlite_path) as conn:
-        conn.execute(
-            """
-            INSERT INTO article_embeddings(
-                article_id, article_url, title, published_timestamp, fetch_timestamp, briefing_summary, one_sentence_summary, metadata_json, embedding_json, embedding_timestamp
-            )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(article_id) DO UPDATE SET
-                article_url=excluded.article_url,
-                title=excluded.title,
-                published_timestamp=excluded.published_timestamp,
-                fetch_timestamp=excluded.fetch_timestamp,
-                embedding_json=excluded.embedding_json,
-                briefing_summary=excluded.briefing_summary,
-                one_sentence_summary=excluded.one_sentence_summary,
-                metadata_json=excluded.metadata_json,
-                embedding_timestamp=excluded.embedding_timestamp
-            """,
-            (
-                str(article["id"]),
-                str(article["url"]),
-                article.get("title"),
-                published_timestamp,
-                fetch_timestamp,
-                briefing_summary,
-                one_sentence_summary,
-                metadata_json,
-                json.dumps(embedding),
-                embedding_timestamp,
-            ),
-        )
-        conn.commit()
+    metadata_payload = {
+        "article_url": str(article["url"]),
+        "title": str(article.get("title") or ""),
+        "fetch_timestamp": fetch_timestamp,
+        "fetch_timestamp_epoch": _fetch_timestamp_to_epoch(fetch_timestamp),
+        "one_sentence_summary": one_sentence_summary or "",
+        "embedding_timestamp": embedding_timestamp,
+        "metadata_json": metadata_json,
+    }
+    collection = _get_embeddings_collection(chroma_config)
+    collection.upsert(
+        ids=[str(article["id"])],
+        documents=[briefing_summary],
+        metadatas=[metadata_payload],
+    )
 
 
 @flow(name="fetch_and_summarize_article_flow")
 def fetch_and_summarize_article_flow(
     article_url: str,
-    ollama_connection: dict[str, str],
+    llm_connection: dict[str, str],
     timeout_sec: int = 120,
 ) -> dict[str, Any]:
     """単一記事の取得・本文抽出・要約を実行するサブフロー。
@@ -1132,24 +1068,24 @@ def fetch_and_summarize_article_flow(
         記事取得タスクと2種類の要約タスクを順に実行し、要約付き記事辞書を返す。
     入力:
         article_url: 記事URL。
-        ollama_connection: Ollama接続設定。
+        llm_connection: LLM接続設定。
         timeout_sec: APIタイムアウト秒。
     出力:
         dict[str, Any]: `fetch_article_task` の結果に要約2種を付与した辞書。
     例外:
         記事取得・要約処理で発生した例外をそのまま送出する。
     外部依存リソース:
-        HTTP記事ページ、Ollama HTTP API。
+        HTTP記事ページ、LiteLLM 対応 LLM API。
     """
     article = fetch_article_task(article_url)
     article["briefing_summary"] = summarize_briefing_task(
         article_content=article["content"],
-        ollama_connection=ollama_connection,
+        llm_connection=llm_connection,
         timeout_sec=timeout_sec,
     )
     article["one_sentence_summary"] = summarize_one_sentence_task(
         article_content=article["content"],
-        ollama_connection=ollama_connection,
+        llm_connection=llm_connection,
         timeout_sec=timeout_sec,
     )
     return article
@@ -1182,8 +1118,8 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
     """フロー実行前提となるPrefectブロック参照を検証する。
 
     処理内容:
-        RSS URLの重複状況をログ出力し、AwsCredentialsブロックとOllama Secretブロックを
-        実際にロードして参照可能性を確認する。
+        RSS URLの重複状況をログ出力し、AwsCredentialsブロックと LLM
+        Secretブロックを実際にロードして参照可能性を確認する。
     入力:
         config: 検証対象設定辞書。
     出力:
@@ -1199,9 +1135,8 @@ def validate_prerequisites_task(config: dict[str, Any]) -> None:
     aws_credentials_block = block_config["aws_credentials_block"]
     AwsCredentials.load(aws_credentials_block)
 
-    ollama_secret_block = block_config.get("llm_connection_block", block_config.get("ollama_connection_block"))
-    load_ollama_connection_secret(ollama_secret_block)
-
+    llm_secret_block = block_config.get("llm_connection_block", block_config.get("ollama_connection_block"))
+    load_llm_connection_secret(llm_secret_block)
 
 @flow(name="rss_ingest_flow")
 def rss_ingest_flow(config_path: str = "config.yaml") -> None:
@@ -1224,16 +1159,12 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
     llm_block_name = config["prefect_blocks"].get("llm_connection_block", config["prefect_blocks"].get("ollama_connection_block"))
-    ollama_secret = load_ollama_connection_secret(llm_block_name)
+    llm_secret = load_llm_connection_secret(llm_block_name)
     rss_ingest_config = config["rss_ingest"]
-    ollama_connection = build_ollama_connection(ollama_secret, rss_ingest_config["llm_model"])
-    embedding_model = rss_ingest_config.get("llm_embedding")
-    if not isinstance(embedding_model, str) or not embedding_model:
-        raise ValueError("config.rss_ingest.llm_embedding must be a non-empty string")
-    embedding_connection = build_ollama_connection(ollama_secret, embedding_model)
+    llm_connection = build_llm_connection(llm_secret, rss_ingest_config["llm_model"])
     llm_timeout_sec = config.get("llm", config.get("ollama", {})).get("request_timeout_sec", 120)
-    sqlite_path = rss_ingest_config["sqlite_path"]
-    _initialize_embeddings_sqlite(sqlite_path)
+    chroma_config = validate_chroma_config(config["chroma"])
+    _get_embeddings_collection(chroma_config)
 
     all_links: list[str] = []
     for feed_url in list(dict.fromkeys(rss_ingest_config["rss_urls"])):
@@ -1245,7 +1176,10 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
     unique_links = list(dict.fromkeys(all_links))
     deduplicated_links: list[str] = []
     for link in unique_links:
-        embedding_lookup = check_embedding_record_exists_task(article_url=link, sqlite_path=sqlite_path)
+        embedding_lookup = check_embedding_record_exists_task(
+            article_url=link,
+            chroma_config=chroma_config,
+        )
         if not embedding_lookup["exists"]:
             deduplicated_links.append(link)
 
@@ -1262,7 +1196,7 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
         try:
             article = fetch_and_summarize_article_flow(
                 article_url=link,
-                ollama_connection=ollama_connection,
+                llm_connection=llm_connection,
                 timeout_sec=llm_timeout_sec,
             )
         except Exception as exc:
@@ -1279,11 +1213,9 @@ def rss_ingest_flow(config_path: str = "config.yaml") -> None:
         )
         if isinstance(article.get("briefing_summary"), str) and article["briefing_summary"]:
             try:
-                upsert_briefing_embedding_to_sqlite_task(
+                upsert_briefing_embedding_to_chroma_task(
                     article=article,
-                    embedding_connection=embedding_connection,
-                    sqlite_path=sqlite_path,
-                    timeout_sec=llm_timeout_sec,
+                    chroma_config=chroma_config,
                 )
             except Exception as exc:
                 logger.warning("embedding upsert skipped: id=%s url=%s reason=%s", article.get("id"), article.get("url"), exc)
@@ -1314,13 +1246,13 @@ def fetch_summarize_url_flow(article_url: str, config_path: str = "config.yaml")
     config = load_config_task(config_path)
     validate_prerequisites_task(config)
     llm_block_name = config["prefect_blocks"].get("llm_connection_block", config["prefect_blocks"].get("ollama_connection_block"))
-    ollama_secret = load_ollama_connection_secret(llm_block_name)
-    ollama_connection = build_ollama_connection(ollama_secret, config["rss_ingest"]["llm_model"])
+    llm_secret = load_llm_connection_secret(llm_block_name)
+    llm_connection = build_llm_connection(llm_secret, config["rss_ingest"]["llm_model"])
     ollama_timeout_sec = config.get("llm", config.get("ollama", {})).get("request_timeout_sec", 120)
 
     article = fetch_and_summarize_article_flow(
         article_url=article_url,
-        ollama_connection=ollama_connection,
+        llm_connection=llm_connection,
         timeout_sec=ollama_timeout_sec,
     )
 

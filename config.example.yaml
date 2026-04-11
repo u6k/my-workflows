@@ -10,6 +10,12 @@ prefect_blocks:
   aws_credentials_block: aws-credentials-prod
   llm_connection_block: llm-connection
 
+chroma:
+  host: 127.0.0.1
+  port: 8000
+  ssl: false
+  collection_name: rss-articles
+
 rss_ingest:
   rss_urls:
     - https://example.com/rss.xml
@@ -17,12 +23,8 @@ rss_ingest:
   s3_bucket: news-bucket
   s3_prefix: rss
   llm_model: ollama/qwen3.5:0.8b
-  llm_embedding: ollama/nomic-embed-text
-  sqlite_path: .data/rss_embeddings.sqlite3
 
 daily_news_blog_digest:
   s3_bucket: news-bucket
   s3_prefix: daily-digest
   llm_model: ollama/qwen3.5:0.8b
-  llm_embedding: ollama/nomic-embed-text
-  sqlite_path: .data/rss_embeddings.sqlite3

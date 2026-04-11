@@ -4,7 +4,6 @@ import argparse
 import json
 import logging
 import math
-import sqlite3
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -17,20 +16,28 @@ from prefect_aws.credentials import AwsCredentials
 if __package__ in {None, ""}:
     sys.path.append(str(Path(__file__).resolve().parent))
     from common import (
-        build_ollama_connection,
+        build_llm_connection,
         create_s3_client,
-        invoke_ollama_generate,
-        load_ollama_connection_secret,
+        get_chroma_collection,
+        invoke_llm_generate,
+        load_llm_connection_secret,
         load_yaml_config,
+        validate_chroma_config,
     )
 else:
     from .common import (
-        build_ollama_connection,
+        build_llm_connection,
         create_s3_client,
-        invoke_ollama_generate,
-        load_ollama_connection_secret,
+        get_chroma_collection,
+        invoke_llm_generate,
+        load_llm_connection_secret,
         load_yaml_config,
+        validate_chroma_config,
     )
+
+build_ollama_connection = build_llm_connection
+load_ollama_connection_secret = load_llm_connection_secret
+invoke_ollama_generate = invoke_llm_generate
 
 
 CATEGORY_SUMMARY_JSON_SCHEMA: dict[str, Any] = {
@@ -171,13 +178,7 @@ def _validate_daily_digest_config(config: dict[str, Any]) -> None:
     if not isinstance(digest_model, str) or not digest_model:
         raise ValueError("config.daily_news_blog_digest.llm_model must be a non-empty string")
 
-    embedding_model = digest_config.get("llm_embedding")
-    if not isinstance(embedding_model, str) or not embedding_model:
-        raise ValueError("config.daily_news_blog_digest.llm_embedding must be a non-empty string")
-
-    sqlite_path = digest_config.get("sqlite_path")
-    if not isinstance(sqlite_path, str) or not sqlite_path:
-        raise ValueError("config.daily_news_blog_digest.sqlite_path must be a non-empty string")
+    validate_chroma_config(config.get("chroma"))
 
     max_articles = config.get("max_articles")
     if max_articles is not None and (not isinstance(max_articles, int) or max_articles <= 0):
@@ -270,102 +271,70 @@ def load_daily_digest_config_task(config_path: str = "config.yaml") -> dict[str,
     return config
 
 
-@task(name="load_daily_articles_from_sqlite_task")
-def load_daily_articles_from_sqlite_task(
+def _get_embeddings_collection(chroma_config: dict[str, Any]) -> Any:
+    """日次ダイジェストが参照する Chroma collection を取得する。"""
+    return get_chroma_collection(chroma_config=chroma_config)
+
+
+@task(name="load_daily_articles_from_chroma_task")
+def load_daily_articles_from_chroma_task(
     target_date: str,
-    sqlite_path: str,
+    chroma_config: dict[str, Any],
     max_articles: int | None = None,
 ) -> list[dict[str, Any]]:
-    """SQLiteから対象日の記事（要約＋埋め込み付き）を時間範囲条件で取得する。
-
-    処理内容:
-        1. `target_date` の日付境界（UTCの00:00:00〜翌日00:00:00）を生成する。
-        2. `article_embeddings` をSQLで時間範囲絞り込みする。
-           - 対象時刻列は `COALESCE(fetch_timestamp, published_timestamp)`
-           - 条件は `>= day_start` かつ `< day_end`
-        3. SQLの `ORDER BY` で新しい順に並べ、必要なら `LIMIT` で件数制限する。
-        4. JSON列を復元して記事辞書配列として返す。
-    入力:
-        target_date: 対象日（`YYYY-MM-DD`）。
-        sqlite_path: 埋め込み保存先SQLiteファイルパス。
-        max_articles: 取得上限件数（未指定時は上限なし）。
-    出力:
-        list[dict[str, Any]]: 対象日の記事配列。
-    例外:
-        ValueError: 日付形式不正、max_articles不正時。
-        sqlite3.Error: DB読み込み失敗時。
-        JSONDecodeError: embedding_json / metadata_json 破損時。
-    外部依存リソース:
-        ローカルSQLiteファイル。
-    """
+    """Chromaから対象日の記事（要約＋埋め込み付き）を時間範囲条件で取得する。"""
     logger = _get_task_logger()
     day = _parse_target_date(target_date)
     if max_articles is not None and max_articles <= 0:
         raise ValueError("max_articles must be a positive integer when provided")
-    day_start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc).isoformat()
-    day_end = datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).isoformat()
 
-    limit_clause = " LIMIT ?" if max_articles is not None else ""
-    query = f"""
-        SELECT
-            article_id,
-            article_url,
-            title,
-            published_timestamp,
-            fetch_timestamp,
-            briefing_summary,
-            one_sentence_summary,
-            metadata_json,
-            embedding_json,
-            embedding_timestamp
-        FROM article_embeddings
-        WHERE datetime(replace(COALESCE(fetch_timestamp, published_timestamp), 'Z', '+00:00')) >= datetime(?)
-          AND datetime(replace(COALESCE(fetch_timestamp, published_timestamp), 'Z', '+00:00')) < datetime(?)
-          AND embedding_json IS NOT NULL
-        ORDER BY datetime(replace(COALESCE(fetch_timestamp, published_timestamp), 'Z', '+00:00')) DESC
-        {limit_clause}
-    """
+    day_start = int(datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    day_end = int(datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    collection = _get_embeddings_collection(chroma_config)
+    result = collection.get(
+        where={
+            "$and": [
+                {"fetch_timestamp_epoch": {"$gte": day_start}},
+                {"fetch_timestamp_epoch": {"$lt": day_end}},
+            ]
+        },
+        include=["metadatas", "embeddings", "documents"],
+    )
 
-    params: list[Any] = [day_start, day_end]
-    if max_articles is not None:
-        params.append(max_articles)
-
-    with sqlite3.connect(sqlite_path) as conn:
-        rows = conn.execute(query, params).fetchall()
+    ids = result.get("ids", []) if isinstance(result, dict) else []
+    metadatas = result.get("metadatas", []) if isinstance(result, dict) else []
+    embeddings = result.get("embeddings", []) if isinstance(result, dict) else []
+    documents = result.get("documents", []) if isinstance(result, dict) else []
 
     articles: list[dict[str, Any]] = []
-    for row in rows:
-        (
-            article_id,
-            article_url,
-            title,
-            published_timestamp,
-            fetch_timestamp,
-            briefing_summary,
-            one_sentence_summary,
-            metadata_json,
-            embedding_json,
-            embedding_timestamp,
-        ) = row
-        embedding = json.loads(embedding_json)
-        if not isinstance(embedding, list) or not embedding:
+    for article_id, metadata, embedding, document in zip(ids, metadatas, embeddings, documents):
+        if not isinstance(metadata, dict) or not isinstance(embedding, list) or not embedding:
             continue
-        articles.append(
-            {
-                "id": article_id,
-                "url": article_url,
-                "title": title,
-                "published_timestamp": published_timestamp,
-                "fetch_timestamp": fetch_timestamp,
-                "briefing_summary": briefing_summary,
-                "one_sentence_summary": one_sentence_summary,
-                "metadata": json.loads(metadata_json) if isinstance(metadata_json, str) and metadata_json else {},
-                "embedding": [float(v) for v in embedding],
-                "embedding_timestamp": embedding_timestamp,
-            }
-        )
+        metadata_json = metadata.get("metadata_json")
+        article = {
+            "id": article_id,
+            "url": metadata.get("article_url"),
+            "title": metadata.get("title"),
+            "published_timestamp": None,
+            "fetch_timestamp": metadata.get("fetch_timestamp"),
+            "briefing_summary": document,
+            "one_sentence_summary": metadata.get("one_sentence_summary"),
+            "metadata": json.loads(metadata_json) if isinstance(metadata_json, str) and metadata_json else {},
+            "embedding": [float(v) for v in embedding],
+            "embedding_timestamp": metadata.get("embedding_timestamp"),
+            "fetch_timestamp_epoch": int(metadata.get("fetch_timestamp_epoch", 0)),
+        }
+        if not isinstance(article["fetch_timestamp"], str) or not article["fetch_timestamp"]:
+            continue
+        articles.append(article)
 
-    logger.info("loaded sqlite articles: total=%d target_date=%s", len(articles), target_date)
+    articles.sort(key=lambda article: int(article.get("fetch_timestamp_epoch", 0)), reverse=True)
+    if max_articles is not None:
+        articles = articles[:max_articles]
+    for article in articles:
+        article.pop("fetch_timestamp_epoch", None)
+
+    logger.info("loaded chroma articles: total=%d target_date=%s", len(articles), target_date)
     return articles
 
 
@@ -530,7 +499,7 @@ def build_category_clusters_task(
 @task(name="summarize_each_category_task")
 def summarize_each_category_task(
     categories: list[dict[str, Any]],
-    ollama_connection: dict[str, str],
+    llm_connection: dict[str, str],
     timeout_sec: int = 120,
 ) -> list[dict[str, Any]]:
     """カテゴリごとに名称と要約を生成し、カテゴリ情報を完成させる。
@@ -541,15 +510,15 @@ def summarize_each_category_task(
         JSONパース失敗時は既存名称を維持してフォールバック要約を設定する。
     入力:
         categories: `build_category_clusters_task` の出力。
-        ollama_connection: Ollama接続設定（base_url/model）。
+        llm_connection: LLM接続設定。
         timeout_sec: API呼び出しタイムアウト秒。
     出力:
         list[dict[str, Any]]: 要約付与済みカテゴリ配列。
     例外:
         ValueError: 入力カテゴリが空の場合。
-        Ollama由来例外: 生成API失敗時。
+        LLM由来例外: 生成API失敗時。
     外部依存リソース:
-        Ollama HTTP API。
+        LiteLLM 対応 LLM API。
     """
     if not categories:
         raise ValueError("categories must not be empty")
@@ -599,8 +568,8 @@ def summarize_each_category_task(
             "}\n\n"
             f"# ニュース記事データ\n{json.dumps(compact_articles, ensure_ascii=False)}"
         )
-        raw = invoke_ollama_generate(
-            ollama_connection=ollama_connection,
+        raw = invoke_llm_generate(
+            llm_connection=llm_connection,
             prompt=prompt,
             timeout_sec=timeout_sec,
             response_format=CATEGORY_SUMMARY_JSON_SCHEMA,
@@ -756,14 +725,14 @@ def save_blog_markdown_to_s3_task(
 
 @flow(name="daily-news-blog-digest-flow")
 def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yaml") -> dict[str, Any]:
-    """SQLite記事埋め込みを用いて日次カテゴリ集合とブログ文書を生成・保存する。
+    """Chroma記事埋め込みを用いて日次カテゴリ集合とブログ文書を生成・保存する。
 
     処理内容:
         1. 設定を読み込み・検証する。
         2. `target_date`（引数必須）を検証する。
         3. S3上のカテゴリースナップショット有無を確認する。
            - 既存ならカテゴリ構築をスキップ。
-           - 未存在ならSQLiteから対象日記事を時間範囲SQLで読み出し、
+           - 未存在なら Chroma から対象日記事を時間範囲条件で読み出し、
              6〜12カテゴリ程度へクラスタリングしてカテゴリ要約を生成し、S3へ保存する。
         4. ブログ生成時は必ずS3上のカテゴリーデータを参照する。
         5. 生成MarkdownをS3へ保存し、保存先キーと件数情報を返す。
@@ -774,10 +743,9 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
         dict[str, Any]: 処理結果サマリ（件数・S3キー・スキップ有無）。
     例外:
         ValueError: 引数/設定/データ不正時。
-        sqlite3.Error: DBアクセス失敗時。
-        boto3/Ollama由来例外: 外部I/O失敗時。
+        boto3/ChromaDB/LLM由来例外: 外部I/O失敗時。
     外部依存リソース:
-        ローカル設定ファイル、ローカルSQLite、AWS S3、Prefectブロック、Ollama HTTP API。
+        ローカル設定ファイル、ChromaDB HTTP サーバー、AWS S3、Prefectブロック、LiteLLM 対応 LLM API。
     """
     logger = _get_task_logger()
     parsed_target_date = _parse_target_date(target_date).isoformat()
@@ -798,13 +766,13 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
 
     skipped_category_build = categories_payload is not None
     if categories_payload is None:
-        articles = load_daily_articles_from_sqlite_task(
+        articles = load_daily_articles_from_chroma_task(
             target_date=parsed_target_date,
-            sqlite_path=config["daily_news_blog_digest"]["sqlite_path"],
+            chroma_config=validate_chroma_config(config["chroma"]),
             max_articles=config.get("max_articles"),
         )
         if not articles:
-            raise ValueError(f"no sqlite articles found for target_date={parsed_target_date}")
+            raise ValueError(f"no chroma articles found for target_date={parsed_target_date}")
 
         clusters = build_category_clusters_task(
             articles=articles,
@@ -813,14 +781,14 @@ def daily_news_blog_digest_flow(target_date: str, config_path: str = "config.yam
             max_iterations=6,
         )
         llm_block_name = config["prefect_blocks"].get("llm_connection_block", config["prefect_blocks"].get("ollama_connection_block"))
-        ollama_secret = load_ollama_connection_secret(llm_block_name)
-        ollama_connection = build_ollama_connection(
-            ollama_secret,
+        llm_secret = load_llm_connection_secret(llm_block_name)
+        llm_connection = build_llm_connection(
+            llm_secret,
             config["daily_news_blog_digest"]["llm_model"],
         )
         categories = summarize_each_category_task(
             categories=clusters,
-            ollama_connection=ollama_connection,
+            llm_connection=llm_connection,
             timeout_sec=config.get("llm", config.get("ollama", {})).get("request_timeout_sec", 120),
         )
         categories_key = save_categories_to_s3_task(
