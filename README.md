@@ -4,7 +4,7 @@
 
 ## 依存管理方針
 
-- Python は **3.10 以上**をサポート対象とする。
+- Python は **3.13** を標準利用バージョンとする。
 - パッケージ管理は **uv** を利用し、依存定義は `pyproject.toml` で管理する。
 
 ## セットアップ手順
@@ -13,8 +13,8 @@
 # uv が未インストールの場合のみ
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 仮想環境作成（Python 3.10+）
-uv venv --python 3.10
+# 仮想環境作成（Python 3.13）
+uv venv --python 3.13
 
 # 仮想環境を有効化
 source .venv/bin/activate
@@ -238,24 +238,18 @@ uv run python flows/daily_news_blog_digest_flow.py --target-date 2026-04-02 --co
 
 `fetch_summarize_url_flow` は、1つのURLだけを取得して `briefing_summary` と `one_sentence_summary` を返す独立フローです。
 
-現状、このフローは `python flows/rss_ingest_flow.py --article-url ...` のような CLI には配線されていません。コード上はフロー関数として定義されているため、直接 import して実行します。
-
 ```bash
-uv run python -c "from flows.rss_ingest_flow import fetch_summarize_url_flow; import json; result = fetch_summarize_url_flow('https://example.com/article', config_path='config.yaml'); print(json.dumps(result, ensure_ascii=False, indent=2))"
+uv run python flows/fetch_summarize_url_flow.py --article-url "https://example.com/article" --config-path config.yaml
 ```
 
 YouTube URL を単一要約フローへ渡す場合も同じフローを利用できます。YouTube のときは `markitdown[youtube-transcription]` が必要で、字幕が取得できない動画は失敗として返ります。
 
-返り値には少なくとも次の項目が含まれます。
+標準出力には次の項目だけが JSON で含まれます。
 
 - `id`
-- `url`
 - `title`
-- `content`
-- `metadata`
-- `briefing_summary`
 - `one_sentence_summary`
-- `raw_html`
+- `briefing_summary`
 
 注意:
 
