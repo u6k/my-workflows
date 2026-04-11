@@ -70,7 +70,7 @@ cp config.example.yaml config.yaml
 - `rss_ingest.s3_bucket`: S3互換ストレージのバケット名
 - `rss_ingest.s3_prefix`: S3 保存プレフィックス
 - 既存オブジェクト判定: `s3://{s3_bucket}/{s3_prefix}/{urlのmd5先頭2文字}/{urlのmd5}.json` が存在する記事は再取得せずスキップ
-- 保存JSON: Trafilatura による本文抽出結果 `content` と、生HTML `raw_html` の両方を保持
+- 保存JSON: 通常記事は Trafilatura による Markdown 本文 `content`、YouTube は `markitdown` の Markdown 本文 `content`、加えて生HTML `raw_html` を保持
 - YouTube URL は `markitdown[youtube-transcription]` の Python API で処理し、`youtube_transcript_languages=["ja", "en"]` を指定して日本語字幕を優先取得する
 - YouTube URL の `content` には `markitdown` が返す Markdown 全文を保持し、`### Transcript` セクションを含む動画文字起こしを後続の要約に利用する
 - YouTube URL で `### Transcript` セクションを取得できない場合は、説明文やメタデータだけで成功扱いにせずエラーとして扱う
@@ -270,7 +270,7 @@ uv run python flows/daily_news_blog_digest_flow.py --target-date 2026-04-02 --co
 
 ## 単一URL要約フローの実行
 
-`fetch_summarize_url_flow` は、1つのURLだけを取得して `briefing_summary` と `one_sentence_summary` を返す独立フローです。
+`fetch_summarize_url_flow` は、1つのURLだけを取得して `briefing_summary` と `one_sentence_summary` を返す独立フローです。内部では通常記事の `content` を Markdown 形式で抽出してから要約します。
 
 ```bash
 uv run python flows/fetch_summarize_url_flow.py --article-url "https://example.com/article" --config-path config.yaml

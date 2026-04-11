@@ -91,7 +91,7 @@ rss_ingest:
 - `title`
 - `published_timestamp`
 - `fetch_timestamp`
-- `content`（本文抽出テキスト。Trafilatura を優先利用）
+- `content`（本文抽出済み Markdown。通常記事は Trafilatura、YouTube は markitdown を利用）
 - `raw_html`
 - `briefing_summary`（Ollama によるブリーフィング要約）
 - `one_sentence_summary`（Ollama による1文要約）
@@ -104,7 +104,7 @@ rss_ingest:
   "title": "記事タイトル",
   "published_timestamp": "2026-04-01T12:34:56Z",
   "fetch_timestamp": "2026-04-02T00:00:00Z",
-  "content": "記事本文（抽出済みテキスト）",
+  "content": "記事本文（抽出済みMarkdown）",
   "raw_html": "<!doctype html>...",
   "briefing_summary": "複数段落の要約（ブリーフィング向け）",
   "one_sentence_summary": "1文要約",
