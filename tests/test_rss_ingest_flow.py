@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -276,6 +277,62 @@ ARTICLE_HTML = b"""<!doctype html>
 """
 
 
+def _build_article_page_html(
+    *,
+    title: str = "",
+    author: str = "",
+    image_url: str = "",
+    published_timestamp: str = "",
+    body: str = "",
+    next_href: str = "",
+    next_text: str = "",
+    next_rel: str = "",
+) -> bytes:
+    meta_lines: list[str] = []
+    if image_url:
+        meta_lines.append(f'<meta property="og:image" content="{image_url}">')
+    if published_timestamp:
+        meta_lines.append(f'<meta property="article:published_time" content="{published_timestamp}">')
+    if author:
+        meta_lines.append(f'<meta name="author" content="{author}">')
+    next_link = ""
+    if next_href:
+        rel_attr = f' rel="{next_rel}"' if next_rel else ""
+        next_link = f'<a href="{next_href}"{rel_attr}>{next_text}</a>'
+    title_tag = f"<title>{title}</title>" if title else ""
+    heading = f"<h1>{title}</h1>" if title else ""
+    return f"""<!doctype html>
+<html>
+  <head>
+    {title_tag}
+    {''.join(meta_lines)}
+  </head>
+  <body>
+    <article>
+      {heading}
+      <p>{body}</p>
+      {next_link}
+    </article>
+  </body>
+</html>
+""".encode("utf-8")
+
+
+def _build_urlopen_side_effect(page_map: dict[str, bytes]):
+    def side_effect(request, timeout=30):
+        requested_url = request.full_url if hasattr(request, "full_url") else request
+        response = MagicMock()
+        response.status = 200
+        response.read.return_value = page_map[requested_url]
+        response.headers.get_content_charset.return_value = "utf-8"
+        context_manager = MagicMock()
+        context_manager.__enter__.return_value = response
+        context_manager.__exit__.return_value = False
+        return context_manager
+
+    return side_effect
+
+
 OLLAMA_GENERATE_RESPONSE = b'{"response":"summary text"}'
 
 
@@ -463,6 +520,207 @@ def test_fetch_article_task_returns_content_and_metadata(
     assert "<html>" in article["raw_html"]
     assert article["metadata"]["author"] == "Jane Doe"
     assert article["metadata"]["tags"] == ["ai", "python", "tech"]
+
+
+@patch("flows.rss_ingest_flow.trafilatura.extract")
+@patch("flows.rss_ingest_flow.urlopen")
+def test_fetch_article_task_follows_next_page_text_and_merges_content(
+    mock_urlopen: MagicMock,
+    mock_trafilatura_extract: MagicMock,
+) -> None:
+    page_1_url = "https://example.com/posts/1"
+    page_2_url = "https://example.com/posts/1?page=2"
+    page_1_html = _build_article_page_html(
+        title="Primary title",
+        author="Jane Doe",
+        body="Page one body",
+        next_href=page_2_url,
+        next_text="次のページ",
+    )
+    page_2_html = _build_article_page_html(
+        title="Secondary title",
+        image_url="https://example.com/image-2.jpg",
+        body="Page two body",
+    )
+    mock_urlopen.side_effect = _build_urlopen_side_effect(
+        {
+            page_1_url: page_1_html,
+            page_2_url: page_2_html,
+        }
+    )
+    mock_trafilatura_extract.side_effect = lambda html, **kwargs: (
+        "# Page 1\n\nPage one body" if "Page one body" in html else "# Page 2\n\nPage two body"
+    )
+
+    article = rss_ingest_flow.fetch_article_task.fn(page_1_url)
+
+    assert article["title"] == "Primary title"
+    assert article["content"] == "# Page 1\n\nPage one body\n\n# Page 2\n\nPage two body"
+    assert "Page one body" in article["raw_html"]
+    assert "Page two body" in article["raw_html"]
+    assert article["metadata"]["author"] == "Jane Doe"
+    assert article["metadata"]["image_url"] == "https://example.com/image-2.jpg"
+    requested_urls = [call.args[0].full_url for call in mock_urlopen.call_args_list]
+    assert requested_urls == [page_1_url, page_2_url]
+
+
+@patch("flows.rss_ingest_flow.trafilatura.extract")
+@patch("flows.rss_ingest_flow.urlopen")
+def test_fetch_article_task_resolves_relative_rel_next_link(
+    mock_urlopen: MagicMock,
+    mock_trafilatura_extract: MagicMock,
+) -> None:
+    page_1_url = "https://example.com/posts/1"
+    page_2_url = "https://example.com/posts/1?page=2"
+    page_1_html = _build_article_page_html(
+        title="Primary title",
+        body="Page one body",
+        next_href="/posts/1?page=2",
+        next_text="ignored text",
+        next_rel="next",
+    )
+    page_2_html = _build_article_page_html(body="Page two body")
+    mock_urlopen.side_effect = _build_urlopen_side_effect(
+        {
+            page_1_url: page_1_html,
+            page_2_url: page_2_html,
+        }
+    )
+    mock_trafilatura_extract.side_effect = lambda html, **kwargs: (
+        "Page one markdown" if "Page one body" in html else "Page two markdown"
+    )
+
+    article = rss_ingest_flow.fetch_article_task.fn(page_1_url)
+
+    assert article["content"] == "Page one markdown\n\nPage two markdown"
+    requested_urls = [call.args[0].full_url for call in mock_urlopen.call_args_list]
+    assert requested_urls == [page_1_url, page_2_url]
+
+
+@patch("flows.rss_ingest_flow.trafilatura.extract")
+@patch("flows.rss_ingest_flow.urlopen")
+def test_fetch_article_task_skips_rel_next_when_url_is_not_pagination_like(
+    mock_urlopen: MagicMock,
+    mock_trafilatura_extract: MagicMock,
+) -> None:
+    page_1_url = "https://example.com/posts/1"
+    page_1_html = _build_article_page_html(
+        title="Primary title",
+        body="Page one body",
+        next_href="/posts/another-article",
+        next_text="ignored text",
+        next_rel="next",
+    )
+    mock_urlopen.side_effect = _build_urlopen_side_effect({page_1_url: page_1_html})
+    mock_trafilatura_extract.return_value = "Page one markdown"
+
+    article = rss_ingest_flow.fetch_article_task.fn(page_1_url)
+
+    assert article["content"] == "Page one markdown"
+    assert mock_urlopen.call_count == 1
+
+
+@patch("flows.rss_ingest_flow.trafilatura.extract")
+@patch("flows.rss_ingest_flow.urlopen")
+def test_fetch_article_task_skips_next_article_text_even_on_same_origin(
+    mock_urlopen: MagicMock,
+    mock_trafilatura_extract: MagicMock,
+) -> None:
+    page_1_url = "https://example.com/posts/1"
+    page_1_html = _build_article_page_html(
+        title="Primary title",
+        body="Page one body",
+        next_href="https://example.com/posts/another-article",
+        next_text="次の記事へ",
+    )
+    mock_urlopen.side_effect = _build_urlopen_side_effect({page_1_url: page_1_html})
+    mock_trafilatura_extract.return_value = "Page one markdown"
+
+    article = rss_ingest_flow.fetch_article_task.fn(page_1_url)
+
+    assert article["content"] == "Page one markdown"
+    assert mock_urlopen.call_count == 1
+
+
+@patch("flows.rss_ingest_flow.trafilatura.extract")
+@patch("flows.rss_ingest_flow.urlopen")
+def test_fetch_article_task_stops_when_next_page_was_already_visited(
+    mock_urlopen: MagicMock,
+    mock_trafilatura_extract: MagicMock,
+) -> None:
+    page_1_url = "https://example.com/posts/1"
+    page_2_url = "https://example.com/posts/1?page=2"
+    page_1_html = _build_article_page_html(
+        body="Page one body",
+        next_href=page_2_url,
+        next_text="next",
+    )
+    page_2_html = _build_article_page_html(
+        body="Page two body",
+        next_href=page_1_url,
+        next_text="next page",
+    )
+    mock_urlopen.side_effect = _build_urlopen_side_effect(
+        {
+            page_1_url: page_1_html,
+            page_2_url: page_2_html,
+        }
+    )
+    mock_trafilatura_extract.side_effect = lambda html, **kwargs: (
+        "Page one markdown" if "Page one body" in html else "Page two markdown"
+    )
+
+    article = rss_ingest_flow.fetch_article_task.fn(page_1_url)
+
+    assert article["content"] == "Page one markdown\n\nPage two markdown"
+    assert mock_urlopen.call_count == 2
+
+
+@patch("flows.rss_ingest_flow.trafilatura.extract")
+@patch("flows.rss_ingest_flow.urlopen")
+def test_fetch_article_task_limits_pagination_to_ten_pages(
+    mock_urlopen: MagicMock,
+    mock_trafilatura_extract: MagicMock,
+) -> None:
+    page_map: dict[str, bytes] = {}
+    for page_number in range(1, 12):
+        page_url = f"https://example.com/posts/1?page={page_number}"
+        next_href = f"https://example.com/posts/1?page={page_number + 1}" if page_number < 11 else ""
+        page_map[page_url] = _build_article_page_html(
+            body=f"Body {page_number}",
+            next_href=next_href,
+            next_text="next",
+        )
+    first_url = "https://example.com/posts/1?page=1"
+    mock_urlopen.side_effect = _build_urlopen_side_effect(page_map)
+    mock_trafilatura_extract.side_effect = lambda html, **kwargs: re.search(r"Body (\d+)", html).group(0)  # type: ignore[union-attr]
+
+    article = rss_ingest_flow.fetch_article_task.fn(first_url)
+
+    assert mock_urlopen.call_count == rss_ingest_flow.MAX_ARTICLE_PAGES
+    assert "Body 10" in article["content"]
+    assert "Body 11" not in article["content"]
+
+
+@patch("flows.rss_ingest_flow.trafilatura.extract")
+@patch("flows.rss_ingest_flow.urlopen")
+def test_fetch_article_task_skips_next_page_on_different_origin(
+    mock_urlopen: MagicMock,
+    mock_trafilatura_extract: MagicMock,
+) -> None:
+    page_1_url = "https://example.com/posts/1"
+    page_1_html = _build_article_page_html(
+        body="Page one body",
+        next_href="https://other.example.com/posts/2",
+        next_text="次のページ",
+    )
+    mock_urlopen.side_effect = _build_urlopen_side_effect({page_1_url: page_1_html})
+    mock_trafilatura_extract.return_value = "Page one markdown"
+
+    article = rss_ingest_flow.fetch_article_task.fn(page_1_url)
+
+    assert article["content"] == "Page one markdown"
+    assert mock_urlopen.call_count == 1
 
 
 def test_is_youtube_url_supports_common_hosts() -> None:

@@ -70,7 +70,7 @@ cp config.example.yaml config.yaml
 - `rss_ingest.s3_bucket`: S3互換ストレージのバケット名
 - `rss_ingest.s3_prefix`: S3 保存プレフィックス
 - 既存オブジェクト判定: `s3://{s3_bucket}/{s3_prefix}/{urlのmd5先頭2文字}/{urlのmd5}.json` が存在する記事は再取得せずスキップ
-- 保存JSON: 通常記事は Trafilatura による Markdown 本文 `content`、YouTube は `markitdown` の Markdown 本文 `content`、加えて生HTML `raw_html` を保持
+- 保存JSON: 通常記事は Trafilatura による Markdown 本文 `content` と生HTML `raw_html` を保持し、分割記事は「次のページ」を最大10ページまで辿って全ページ分を結合する。YouTube は `markitdown` の Markdown 本文 `content` を保持する
 - YouTube URL は `markitdown[youtube-transcription]` の Python API で処理し、`youtube_transcript_languages=["ja", "en"]` を指定して日本語字幕を優先取得する
 - YouTube URL の `content` には `markitdown` が返す Markdown 全文を保持し、`### Transcript` セクションを含む動画文字起こしを後続の要約に利用する
 - YouTube URL で `### Transcript` セクションを取得できない場合は、説明文やメタデータだけで成功扱いにせずエラーとして扱う
