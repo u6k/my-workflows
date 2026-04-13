@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urldefrag, urljoin, urlparse
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
@@ -47,7 +47,8 @@ invoke_ollama_generate = invoke_llm_generate
 REQUIRED_PREFECT_BLOCK_KEYS = (
     "aws_credentials_block",
 )
-BRIEFING_PROMPT_TEMPLATE = """以下のニュース記事から主要なテーマとアイデアを統合した包括的なブリーフィングドキュメントを作成してください。まずは、最も重要なポイントを簡潔にまとめたエグゼクティブサマリーから始めましょう。本文では、情報源に含まれる主要なテーマ、証拠、そして結論を詳細かつ徹底的に検証する必要があります。分析は、明瞭性を確保するために、見出しと箇条書きを用いて論理的に構成する必要があります。トーンは客観的かつ鋭いものでなければなりません。
+MAX_ARTICLE_PAGES = 10
+BRIEFING_PROMPT_TEMPLATE = """以下のニュース記事から主要なテーマとアイデアを統合した包括的なブリーフィングドキュメントを作成してください。まずは、最も重要なポイントを簡潔にまとめたエグゼクティブサマリーから始めましょう。本文では、情報源に含まれる主要なテーマ、証拠、そして結論を詳細かつ徹底的に検証する必要があります。分析は、明瞭性を確保するために、見出しと箇条書きを用いて論理的に構成する必要があります。トーンは客観的かつ鋭いものでなければなりません。出力形式はMarkdownで出力してください。
 
 # ニュース記事
 ```markdown
@@ -717,6 +718,55 @@ class _ArticleHTMLParser(HTMLParser):
         self.visible_text_parts.append(text)
 
 
+class _PaginationLinkParser(HTMLParser):
+    """記事HTMLから次ページ候補リンクを抽出する。"""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.next_href_by_rel: str | None = None
+        self.current_anchor_href: str | None = None
+        self.current_anchor_text_parts: list[str] = []
+        self.next_href_by_text: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+
+        attrs_dict = {key.lower(): (value or "") for key, value in attrs}
+        href = attrs_dict.get("href", "").strip()
+        if not href:
+            return
+
+        rel_tokens = {token for token in attrs_dict.get("rel", "").lower().split() if token}
+        if "next" in rel_tokens and self.next_href_by_rel is None:
+            self.next_href_by_rel = href
+
+        self.current_anchor_href = href
+        self.current_anchor_text_parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a":
+            return
+
+        if self.current_anchor_href and self.next_href_by_text is None:
+            anchor_text = " ".join(self.current_anchor_text_parts)
+            if _is_next_page_anchor_text(anchor_text):
+                self.next_href_by_text = self.current_anchor_href
+
+        self.current_anchor_href = None
+        self.current_anchor_text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if not self.current_anchor_href:
+            return
+
+        text = data.strip()
+        if not text:
+            return
+
+        self.current_anchor_text_parts.append(text)
+
+
 def _extract_article_content_and_metadata(article_html: str) -> dict[str, Any]:
     """記事HTMLから本文とメタデータを抽出して返す。
 
@@ -759,6 +809,139 @@ def _extract_article_content_and_metadata(article_html: str) -> dict[str, Any]:
         "title": parser.title or "",
         "content": content,
         "metadata": metadata,
+    }
+
+
+def _is_next_page_anchor_text(anchor_text: str) -> bool:
+    """アンカーテキストが次ページ導線かを判定する。"""
+    normalized_text = re.sub(r"\s+", " ", anchor_text).strip().casefold()
+    return normalized_text in {"next", "next page", "次のページ"}
+
+
+def _normalize_article_page_url(url: str) -> str:
+    """比較用にURLからフラグメントを除去する。"""
+    normalized_url, _ = urldefrag(url)
+    return normalized_url
+
+
+def _looks_like_pagination_url(url: str) -> bool:
+    """URLがページネーションらしい形かを判定する。"""
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    for key in ("page", "paged", "p"):
+        values = query.get(key, [])
+        if any(value.isdigit() for value in values):
+            return True
+
+    return re.search(r"/page/\d+/?$", parsed.path, flags=re.IGNORECASE) is not None
+
+
+def _is_same_origin_url(base_url: str, candidate_url: str) -> bool:
+    """2つのURLが同一 origin かを返す。"""
+    base = urlparse(base_url)
+    candidate = urlparse(candidate_url)
+    return (
+        base.scheme.lower(),
+        base.netloc.lower(),
+    ) == (
+        candidate.scheme.lower(),
+        candidate.netloc.lower(),
+    )
+
+
+def _find_next_page_url(article_html: str, current_url: str, root_url: str, visited_urls: set[str]) -> str | None:
+    """HTMLから次ページURLを抽出して返す。"""
+    parser = _PaginationLinkParser()
+    parser.feed(article_html)
+    candidate_hrefs: list[str] = []
+    if parser.next_href_by_text:
+        candidate_hrefs.append(parser.next_href_by_text)
+    if parser.next_href_by_rel:
+        candidate_hrefs.append(parser.next_href_by_rel)
+
+    for candidate_href in candidate_hrefs:
+        candidate_url = _normalize_article_page_url(urljoin(current_url, candidate_href))
+        if not candidate_url.startswith(("http://", "https://")):
+            continue
+        if not _is_same_origin_url(root_url, candidate_url):
+            continue
+        if candidate_url in visited_urls:
+            continue
+        if candidate_href == parser.next_href_by_rel and not _looks_like_pagination_url(candidate_url):
+            continue
+        return candidate_url
+    return None
+
+
+def _fetch_html_page(article_url: str) -> str:
+    """通常記事ページのHTMLを取得して返す。"""
+    request = Request(
+        article_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; rss-ingest-flow/1.0)",
+        },
+    )
+    with urlopen(request, timeout=30) as response:
+        status = getattr(response, "status", 200)
+        if status != 200:
+            raise ValueError(f"unexpected status code: {status}")
+
+        raw_html = response.read()
+        content_type = response.headers.get_content_charset() or "utf-8"
+    return raw_html.decode(content_type, errors="replace")
+
+
+def _append_joined_text(parts: list[str], value: str) -> None:
+    """空文字を除外しながら結合対象テキストを蓄積する。"""
+    stripped_value = value.strip()
+    if stripped_value:
+        parts.append(stripped_value)
+
+
+def _merge_article_metadata(base_metadata: dict[str, Any], next_metadata: dict[str, Any]) -> dict[str, Any]:
+    """先頭ページ優先でメタデータを統合する。"""
+    merged_metadata = dict(base_metadata)
+    for key, value in next_metadata.items():
+        if key not in merged_metadata:
+            merged_metadata[key] = value
+    return merged_metadata
+
+
+def _fetch_paginated_article(article_url: str, logger: logging.Logger) -> dict[str, Any]:
+    """通常記事のページネーションを辿って記事辞書を返す。"""
+    normalized_root_url = _normalize_article_page_url(article_url)
+    visited_urls: set[str] = set()
+    current_url = normalized_root_url
+    page_count = 0
+    title = ""
+    metadata: dict[str, Any] = {}
+    content_parts: list[str] = []
+    raw_html_parts: list[str] = []
+
+    while current_url and page_count < MAX_ARTICLE_PAGES:
+        normalized_current_url = _normalize_article_page_url(current_url)
+        if normalized_current_url in visited_urls:
+            break
+        visited_urls.add(normalized_current_url)
+
+        article_html = _fetch_html_page(normalized_current_url)
+        logger.debug("article page fetched: url=%s page_length=%d", normalized_current_url, len(article_html))
+        extracted = _extract_article_content_and_metadata(article_html)
+
+        if not title:
+            title = extracted.get("title", "")
+        metadata = _merge_article_metadata(metadata, extracted.get("metadata", {}))
+        _append_joined_text(content_parts, extracted.get("content", ""))
+        _append_joined_text(raw_html_parts, article_html)
+
+        page_count += 1
+        current_url = _find_next_page_url(article_html, normalized_current_url, normalized_root_url, visited_urls)
+
+    return {
+        "title": title,
+        "content": "\n\n".join(content_parts),
+        "metadata": metadata,
+        "raw_html": "\n".join(raw_html_parts),
     }
 
 
@@ -829,28 +1012,10 @@ def fetch_article_task(article_url: str) -> dict[str, Any]:
         )
         return transcript_article
 
-    request = Request(
-        article_url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (compatible; rss-ingest-flow/1.0)",
-        },
-    )
-
     try:
-        with urlopen(request, timeout=30) as response:
-            status = getattr(response, "status", 200)
-            if status != 200:
-                raise ValueError(f"unexpected status code: {status}")
-
-            raw_html = response.read()
-            content_type = response.headers.get_content_charset() or "utf-8"
-
-        article_html = raw_html.decode(content_type, errors="replace")
-        logger.debug("article page fetched: url=%s page_length=%d", article_url, len(article_html))
-        extracted = _extract_article_content_and_metadata(article_html)
+        extracted = _fetch_paginated_article(article_url, logger)
         extracted["url"] = article_url
         extracted["id"] = _url_to_md5(article_url)
-        extracted["raw_html"] = article_html
         extracted["fetch_timestamp"] = datetime.now(timezone.utc).isoformat()
         metadata_published_timestamp = extracted.get("metadata", {}).get("published_timestamp")
         if isinstance(metadata_published_timestamp, str):
